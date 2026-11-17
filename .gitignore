@@ -1,0 +1,10 @@
+dxvk/
+Release/
+Debug/
+__pycache__/
+*.obj
+*.pdb
+*.log
+*.private.*
+payload/
+generated/

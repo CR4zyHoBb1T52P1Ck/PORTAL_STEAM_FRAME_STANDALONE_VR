@@ -1,0 +1,472 @@
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index b4bbd4a..cdb43cb 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -26,6 +26,7 @@
+ 
+ #include "L4D2VR/game.h"
+ #include "L4D2VR/vr.h"
++#include "L4D2VR/debuglog.h"
+ #include "L4D2VR/sdk/sdk.h"
+ #include "d3d9_vr.h"
+ 
+@@ -379,11 +380,8 @@ namespace dxvk {
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::Reset(D3DPRESENT_PARAMETERS* pPresentationParameters) {
+-    if (g_Game && g_Game->m_VR)
+-    {
+-        pPresentationParameters->BackBufferWidth = g_Game->m_VR->m_RenderWidth;
+-        pPresentationParameters->BackBufferHeight = g_Game->m_VR->m_RenderHeight;
+-    }
++    // Keep the desktop mode requested by Source. VR uses separate eye targets;
++    // replacing this with the headset resolution breaks fullscreen resets.
+ 
+     D3D9DeviceLock lock = LockDevice();
+ 
+@@ -528,25 +526,25 @@ namespace dxvk {
+           if (texID == VR::Texture_LeftEye)
+           {
+               textureTarget = &g_Game->m_VR->m_VKLeftEye;
+-              texture.ref()->GetSurfaceLevel(0, &g_Game->m_VR->m_D9LeftEyeSurface);
++              texture->GetSurfaceLevel(0, &g_Game->m_VR->m_D9LeftEyeSurface);
+               g_D3DVR9->GetVRDesc(g_Game->m_VR->m_D9LeftEyeSurface, &texDesc);
+           }
+           else if (texID == VR::Texture_RightEye)
+           {
+               textureTarget = &g_Game->m_VR->m_VKRightEye;
+-              texture.ref()->GetSurfaceLevel(0, &g_Game->m_VR->m_D9RightEyeSurface);
++              texture->GetSurfaceLevel(0, &g_Game->m_VR->m_D9RightEyeSurface);
+               g_D3DVR9->GetVRDesc(g_Game->m_VR->m_D9RightEyeSurface, &texDesc);
+           }
+           else if (texID == VR::Texture_HUD)
+           {
+               textureTarget = &g_Game->m_VR->m_VKHUD;
+-              texture.ref()->GetSurfaceLevel(0, &g_Game->m_VR->m_D9HUDSurface);
++              texture->GetSurfaceLevel(0, &g_Game->m_VR->m_D9HUDSurface);
+               g_D3DVR9->GetVRDesc(g_Game->m_VR->m_D9HUDSurface, &texDesc);
+           }
+           else if (texID == VR::Texture_Blank)
+           {
+               textureTarget = &g_Game->m_VR->m_VKBlankTexture;
+-              texture.ref()->GetSurfaceLevel(0, &g_Game->m_VR->m_D9BlankSurface);
++              texture->GetSurfaceLevel(0, &g_Game->m_VR->m_D9BlankSurface);
+               g_D3DVR9->GetVRDesc(g_Game->m_VR->m_D9BlankSurface, &texDesc);
+           }
+ 
+@@ -1313,6 +1311,30 @@ namespace dxvk {
+     if (unlikely(rt != nullptr && !(texInfo->Desc()->Usage & D3DUSAGE_RENDERTARGET)))
+       return D3DERR_INVALIDCALL;
+ 
++    // Source reallocates render targets when loading a map. Capture the surface
++    // it binds for each eye instead of retaining the initial allocation forever.
++    if (RenderTargetIndex == 0 && g_Game && g_Game->m_VR && g_D3DVR9) {
++      auto *vrState = g_Game->m_VR;
++      const auto eye = vrState->m_BindingEyeTexture;
++      if (eye == VR::Texture_LeftEye || eye == VR::Texture_RightEye) {
++        auto &surface = eye == VR::Texture_LeftEye ? vrState->m_D9LeftEyeSurface : vrState->m_D9RightEyeSurface;
++        auto &holder = eye == VR::Texture_LeftEye ? vrState->m_VKLeftEye : vrState->m_VKRightEye;
++        D3D9_TEXTURE_VR_DESC desc{};
++        if (SUCCEEDED(g_D3DVR9->GetVRDesc(pRenderTarget, &desc))) {
++          if (surface != pRenderTarget) {
++            pRenderTarget->AddRef();
++            if (surface) surface->Release();
++            surface = pRenderTarget;
++            PortalVrLog("Refreshed eye=%d surface=%p image=%llu actual=%ux%u samples=%u", eye, surface, desc.Image,desc.Width,desc.Height,desc.SampleCount);
++          }
++          static_assert(sizeof(desc) == sizeof(holder.m_VulkanData));
++          memcpy(&holder.m_VulkanData, &desc, sizeof(desc));
++          holder.m_VRTexture = { &holder.m_VulkanData, vr::TextureType_Vulkan, vr::ColorSpace_Auto };
++        }
++        vrState->m_BindingEyeTexture = VR::Texture_None;
++      }
++    }
++
+     if (RenderTargetIndex == 0) {
+       auto rtSize = rt->GetSurfaceExtent();
+ 
+@@ -1683,16 +1705,24 @@ namespace dxvk {
+ 
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetViewport(const D3DVIEWPORT9* pViewport) {
+     
+-     // TODO: Overriding the viewport in-game will mess up the shadows, so only do it in the menu for now.
+-    if (g_Game && !g_Game->m_EngineClient->IsInGame())
+-    {
+-        D3DVIEWPORT9 *newViewport = const_cast<D3DVIEWPORT9 *>(pViewport);
+-        newViewport->Width = g_Game->m_VR->m_RenderWidth;
+-        newViewport->Height = g_Game->m_VR->m_RenderHeight;
+-    }
++    // Source owns the viewport. In particular, menu rendering starts before
++    // the engine and VR interfaces are available. Never mutate caller memory.
++    if (!pViewport)
++      return D3DERR_INVALIDCALL;
+       
+     D3D9DeviceLock lock = LockDevice();
+ 
++    if(g_Game&&g_Game->m_VR) {
++      auto* vrState=g_Game->m_VR;auto* target=m_state.renderTargets[0].ptr();
++      const int eye=target&&target==vrState->m_D9LeftEyeSurface?0:target&&target==vrState->m_D9RightEyeSurface?1:-1;
++      if(eye>=0) {
++        static unsigned counts[2]{},widths[2]{},heights[2]{};
++        if((widths[eye]!=pViewport->Width||heights[eye]!=pViewport->Height)&&counts[eye]++<12)
++          PortalVrLog("Eye device viewport eye=%d xy=%u,%u size=%ux%u target=%ux%u",eye,pViewport->X,pViewport->Y,pViewport->Width,pViewport->Height,target->GetCommonTexture()->Desc()->Width,target->GetCommonTexture()->Desc()->Height);
++        widths[eye]=pViewport->Width;heights[eye]=pViewport->Height;
++      }
++    }
++
+     if (unlikely(ShouldRecord()))
+       return m_recorder->SetViewport(pViewport);
+ 
+@@ -3547,17 +3577,52 @@ namespace dxvk {
+     pDirtyRegion,
+     dwFlags);
+ 
+-    if (g_Game && g_Game->m_VR && g_Game->m_VR->m_CreatedVRTextures) {
++    // Opt-in render diagnostics; no GPU readback during normal play.
++    static const bool dumpEyeTextures = strstr(GetCommandLineA(), "-portalvr-debug-textures") != nullptr;
++    static unsigned dumpFrame = 0;
++    if (dumpEyeTextures && (++dumpFrame == 160 || dumpFrame == 900 || dumpFrame == 1800) && g_Game && g_Game->m_VR) {
++      auto dumpSurface = [&](IDirect3DSurface9 *source, const char *name) {
++        if (!source) return;
++        D3DSURFACE_DESC desc{}; source->GetDesc(&desc);
++        IDirect3DSurface9 *copy = nullptr;
++        if (FAILED(CreateOffscreenPlainSurface(desc.Width, desc.Height, desc.Format, D3DPOOL_SYSTEMMEM, &copy, nullptr))) return;
++        if (SUCCEEDED(GetRenderTargetData(source, copy))) {
++          D3DLOCKED_RECT data{};
++          if (SUCCEEDED(copy->LockRect(&data, nullptr, D3DLOCK_READONLY))) {
++            BITMAPFILEHEADER header{}; BITMAPINFOHEADER info{};
++            header.bfType=0x4d42; header.bfOffBits=sizeof(header)+sizeof(info);
++            header.bfSize=header.bfOffBits+desc.Width*desc.Height*4;
++            info.biSize=sizeof(info); info.biWidth=desc.Width; info.biHeight=-LONG(desc.Height);
++            info.biPlanes=1; info.biBitCount=32; info.biCompression=BI_RGB;
++            FILE *file=nullptr; fopen_s(&file,name,"wb");
++            if(file) { fwrite(&header,sizeof(header),1,file); fwrite(&info,sizeof(info),1,file);
++              for(UINT y=0;y<desc.Height;y++) fwrite(static_cast<char *>(data.pBits)+y*data.Pitch,desc.Width*4,1,file);
++              fclose(file); }
++            copy->UnlockRect();
++          }
++        }
++        copy->Release();
++      };
++      dumpSurface(g_Game->m_VR->m_D9LeftEyeSurface,"portalvr-left.bmp");
++      dumpSurface(g_Game->m_VR->m_D9RightEyeSurface,"portalvr-right.bmp");
++      IDirect3DSurface9 *back=nullptr; GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,&back);
++      dumpSurface(back,"portalvr-desktop.bmp"); if(back) back->Release();
++    }
++    if (g_Game && g_Game->m_VR && g_Game->m_VR->m_CreatedVRTextures
++        && g_Game->m_VR->m_D9LeftEyeSurface && g_Game->m_VR->m_D9RightEyeSurface) {
+       ResolveImage(GetCommonTexture(g_Game->m_VR->m_D9LeftEyeSurface));
+       ResolveImage(GetCommonTexture(g_Game->m_VR->m_D9RightEyeSurface));
+     }
+ 	  
+-	g_D3DVR9->WaitDeviceIdle();
+-    
+-    if (g_Game && g_Game->m_VR)
+-    {
+-        g_Game->m_VR->Update();
++    if (g_D3DVR9 && g_Game && g_Game->m_VR && g_Game->m_VR->m_IsInitialized) {
++      const auto upscaleResult=g_D3DVR9->UpscaleEyes();
++      static HRESULT lastUpscale=S_FALSE;
++      if(upscaleResult!=lastUpscale) {Logger::info(str::format("SGSR result ",upscaleResult));lastUpscale=upscaleResult;}
++      // BeginTextureSubmission drains render/resolve/upscale plus layout barriers
++      // together. An earlier full-device idle duplicated the same frame wait.
+     }
++
++    UpdatePortalVr();
+ 	  
+ 	return result;
+   }
+@@ -7159,6 +7224,17 @@ namespace dxvk {
+   }
+ 
+ 
++  void D3D9DeviceEx::TransformVrImage(const Rc<DxvkImage>& image, bool toVr) {
++    // Keep DXVK's normal layout unchanged. Restore it after SteamVR's read,
++    // before the next render/resolve uses this image again.
++    EmitCs([cImage=image,cToVr=toVr](DxvkContext* ctx) {
++      const auto normal=cImage->info().layout;
++      ctx->transformImage(cImage,cImage->getAvailableSubresources(),
++        cToVr?normal:VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++        cToVr?VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:normal);
++    });
++  }
++
+   void D3D9DeviceEx::TransformImage(
+           D3D9CommonTexture*       pResource,
+     const VkImageSubresourceRange* pSubresources,
+diff --git a/src/d3d9/d3d9_device.h b/src/d3d9/d3d9_device.h
+index 8ce04e2..d70482f 100644
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -910,6 +910,8 @@ namespace dxvk {
+ 
+     void TransitionImage(D3D9CommonTexture* pResource, VkImageLayout NewLayout);
+ 
++    void TransformVrImage(const Rc<DxvkImage>& image, bool toVr);
++
+     void TransformImage(
+             D3D9CommonTexture*       pResource,
+       const VkImageSubresourceRange* pSubresources,
+diff --git a/src/d3d9/d3d9_interface.cpp b/src/d3d9/d3d9_interface.cpp
+index 9713399..5bf2310 100644
+--- a/src/d3d9/d3d9_interface.cpp
++++ b/src/d3d9/d3d9_interface.cpp
+@@ -241,25 +241,12 @@ namespace dxvk {
+           D3DPRESENT_PARAMETERS* pPresentationParameters,
+           IDirect3DDevice9**     ppReturnedDeviceInterface) {
+     
+-	vr::HmdError error = vr::VRInitError_None;
+-    vr::IVRSystem* system = vr::VR_Init(&error, vr::VRApplication_Scene);
++    if (!pPresentationParameters || !ppReturnedDeviceInterface)
++      return D3DERR_INVALIDCALL;
++    *ppReturnedDeviceInterface = nullptr;
++    // OpenVR is initialized by the mod after Source and the device are ready.
++    // Failure to find a headset must not terminate Direct3D device creation.
+ 
+-    if (error == vr::VRInitError_None) 
+-    {
+-        // Override viewport size
+-        uint32_t renderWidth, renderHeight;
+-        system->GetRecommendedRenderTargetSize(&renderWidth, &renderHeight);
+-        pPresentationParameters->BackBufferWidth = renderWidth;
+-        pPresentationParameters->BackBufferHeight = renderHeight;
+-    }
+-    else
+-    {
+-        char errorString[256];
+-        snprintf(errorString, 256, "VR_Init failed: %s", vr::VR_GetVRInitErrorAsEnglishDescription(error));
+-        MessageBox(0, errorString, "DXVK", MB_ICONERROR | MB_OK);
+-        ExitProcess(0);
+-    }
+-	
+ 	auto result = this->CreateDeviceEx(
+         Adapter,
+         DeviceType,
+@@ -269,7 +256,8 @@ namespace dxvk {
+         nullptr, // <-- pFullscreenDisplayMode
+         reinterpret_cast<IDirect3DDevice9Ex**>(ppReturnedDeviceInterface));
+ 	  
+-	Direct3DCreateVRImpl(*ppReturnedDeviceInterface, &g_D3DVR9);
++    if (SUCCEEDED(result) && *ppReturnedDeviceInterface)
++      Direct3DCreateVRImpl(*ppReturnedDeviceInterface, &g_D3DVR9);
+ 	  
+ 	return result;
+   }
+diff --git a/src/d3d9/d3d9_vr.cpp b/src/d3d9/d3d9_vr.cpp
+index 8ed15b0..9b7f511 100644
+--- a/src/d3d9/d3d9_vr.cpp
++++ b/src/d3d9/d3d9_vr.cpp
+@@ -9,6 +9,7 @@
+ 
+ #include "L4D2VR/game.h"
+ #include "L4D2VR/vr.h"
++#include "L4D2VR/sgsr-d3d9-interop.h"
+ 
+ namespace dxvk {
+ 
+@@ -20,6 +21,11 @@ namespace dxvk {
+             : m_device(static_cast<D3D9DeviceEx *>(pDevice))
+         {}
+ 
++        ~D3D9VR() {
++            if(m_backgroundSurface)m_backgroundSurface->Release();
++            if(m_background)m_background->Release();
++        }
++
+         HRESULT STDMETHODCALLTYPE QueryInterface(
+             REFIID riid,
+             void **ppvObject)
+@@ -79,22 +85,13 @@ namespace dxvk {
+                 return D3DERR_INVALIDCALL;
+ 
+             auto *tex = static_cast<D3D9Surface *>(pSurface)->GetCommonTexture();
+-            const auto &image = tex->GetImage();
+-
+-            VkImageSubresourceRange subresources = {
+-              VK_IMAGE_ASPECT_COLOR_BIT,
+-              0, image->info().mipLevels,
+-              0, image->info().numLayers
+-            };
+-
+-            m_device->TransformImage(
+-                tex, &subresources,
+-                image->info().layout,
+-                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++            const auto image = tex->Desc()->MultiSample!=D3DMULTISAMPLE_NONE?tex->GetResolveImage():tex->GetImage();
++            if(image==nullptr)return D3DERR_INVALIDCALL;
++            m_device->TransformVrImage(image,true);
+ 
+             // This wait may need to be on all Faces and Mip Levels (2 loops).
+             if (waitResourceIdle)
+-                m_device->WaitForResource(image, tex->GetMappingBufferSequenceNumber(0u), D3DLOCK_READONLY);
++                WaitDeviceIdle();
+ 
+             return D3D_OK;
+         }
+@@ -122,27 +119,108 @@ namespace dxvk {
+ 
+         HRESULT STDMETHODCALLTYPE GetBackBufferData(SharedTextureHolder* backBufferData)
+         {
+-            IDirect3DSurface9 *backBufferSurface;
+-
++            if (!backBufferData)
++                return D3DERR_INVALIDCALL;
++            IDirect3DSurface9 *backBufferSurface = nullptr;
+             HRESULT res = m_device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backBufferSurface);
+-
+-            vr::VRVulkanTextureData_t vulkanData;
+-            memset(&vulkanData, 0, sizeof(vr::VRVulkanTextureData_t));
+-
+-            SharedTextureHolder *textureTarget;
+-            D3D9_TEXTURE_VR_DESC textureDesc;
+-            
+-            GetVRDesc(backBufferSurface, &textureDesc);
+-            
+-            memcpy(&backBufferData->m_VulkanData, &textureDesc, sizeof(vr::VRVulkanTextureData_t));
++            if (FAILED(res) || !backBufferSurface)
++                return FAILED(res) ? res : D3DERR_INVALIDCALL;
++            D3D9_TEXTURE_VR_DESC textureDesc{};
++            res = GetVRDesc(backBufferSurface, &textureDesc);
++            backBufferSurface->Release();
++            if (FAILED(res))
++                return res;
++            static_assert(sizeof(textureDesc) == sizeof(vr::VRVulkanTextureData_t));
++            memcpy(&backBufferData->m_VulkanData, &textureDesc, sizeof(textureDesc));
+             backBufferData->m_VRTexture.handle = &backBufferData->m_VulkanData;
+             backBufferData->m_VRTexture.eColorSpace = vr::ColorSpace_Auto;
+             backBufferData->m_VRTexture.eType = vr::TextureType_Vulkan;
+-        
+-            return res;
++            return D3D_OK;
++        }
++
++        HRESULT STDMETHODCALLTYPE UpscaleEyes() {
++            return g_Game && g_Game->m_VR ? m_upscaler.Render(m_device,g_Game->m_VR) : E_FAIL;
++        }
++
++        HRESULT STDMETHODCALLTYPE GetMenuBackgroundData(SharedTextureHolder* data) {
++            if(!data)return D3DERR_INVALIDCALL;
++            if(!m_backgroundReady) {
++                // A scene background must never alias the desktop image that
++                // SteamVR is simultaneously importing as the menu overlay.
++                if(!m_background&&FAILED(m_device->CreateTexture(2,2,1,D3DUSAGE_RENDERTARGET,
++                    D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,&m_background,nullptr)))return E_FAIL;
++                if(!m_backgroundSurface&&FAILED(m_background->GetSurfaceLevel(0,&m_backgroundSurface)))return E_FAIL;
++                if(FAILED(m_device->ColorFill(m_backgroundSurface,nullptr,D3DCOLOR_ARGB(255,0,0,0))))return E_FAIL;
++                if(FAILED(TransferSurface(m_backgroundSurface,TRUE))||FAILED(WaitDeviceIdle()))return E_FAIL;
++                m_backgroundReady=true;
++                PortalVrLog("Independent immutable menu scene background ready 2x2 (desktop is overlay only)");
++            }
++            D3D9_TEXTURE_VR_DESC desc{};
++            const auto result=GetVRDesc(m_backgroundSurface,&desc);if(FAILED(result))return result;
++            static_assert(sizeof(desc)==sizeof(data->m_VulkanData));
++            memcpy(&data->m_VulkanData,&desc,sizeof(desc));
++            data->m_VRTexture={&data->m_VulkanData,vr::TextureType_Vulkan,vr::ColorSpace_Auto};
++            return D3D_OK;
++        }
++
++        HRESULT STDMETHODCALLTYPE LockVulkanQueue() {
++            if(m_queueLocked)return D3DERR_INVALIDCALL;
++            m_device->Flush();
++            m_device->SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
++            m_device->GetDXVKDevice()->lockSubmission();
++            m_queueLocked=true;return D3D_OK;
++        }
++        HRESULT STDMETHODCALLTYPE UnlockVulkanQueue() {
++            if(!m_queueLocked)return D3DERR_INVALIDCALL;
++            m_device->GetDXVKDevice()->unlockSubmission();
++            m_queueLocked=false;return D3D_OK;
++        }
++        HRESULT STDMETHODCALLTYPE BeginTextureSubmission() {
++            if(m_queueLocked||!m_externalImages.empty())return D3DERR_INVALIDCALL;
++            IDirect3DSurface9* desktop=nullptr;
++            if(SUCCEEDED(m_device->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,&desktop))&&desktop) {
++                AddExternalImage(desktop);desktop->Release();
++            }
++            auto* vr=g_Game?g_Game->m_VR:nullptr;
++            if(vr&&vr->m_RenderedNewFrame&&vr->m_CreatedVRTextures) {
++                const bool upscaled=vr->m_UpscaleReady&&vr->m_Graphics.upscaler!=0;
++                AddExternalImage(upscaled?m_upscaler.Surface(0):vr->m_D9LeftEyeSurface);
++                AddExternalImage(upscaled?m_upscaler.Surface(1):vr->m_D9RightEyeSurface);
++            }
++            if(m_lastExternalCount!=int(m_externalImages.size())) {
++                m_lastExternalCount=int(m_externalImages.size());
++                PortalVrLog("Vulkan bridge imageCount=%d submitLayout=TRANSFER_SRC_OPTIMAL queue=serialized restore=after-submit",m_lastExternalCount);
++                for(const auto& image:m_externalImages)PortalVrLog("Vulkan bridge image=%llu size=%ux%u samples=%u normalLayout=%d",uint64_t(image->handle()),image->info().extent.width,image->info().extent.height,unsigned(image->info().sampleCount),int(image->info().layout));
++            }
++            // One complete wait covers render, resolves, upscaling and barriers.
++            const auto waitStart=std::chrono::steady_clock::now();
++            WaitDeviceIdle();
++            if(vr)vr->m_LastGpuWaitMs=std::chrono::duration<float,std::milli>(std::chrono::steady_clock::now()-waitStart).count();
++            return LockVulkanQueue();
++        }
++        HRESULT STDMETHODCALLTYPE EndTextureSubmission() {
++            const auto result=UnlockVulkanQueue();
++            for(const auto& image:m_externalImages)m_device->TransformVrImage(image,false);
++            m_externalImages.clear();
++            return result;
+         }
+ 
+     private:
++        std::vector<Rc<DxvkImage>> m_externalImages;
++        bool m_queueLocked=false;
++        int m_lastExternalCount=-1;
++        void AddExternalImage(IDirect3DSurface9* surface) {
++            if(!surface)return;
++            auto* texture=static_cast<D3D9Surface*>(surface)->GetCommonTexture();
++            auto image=texture->Desc()->MultiSample!=D3DMULTISAMPLE_NONE?texture->GetResolveImage():texture->GetImage();
++            if(image==nullptr)return;
++            for(const auto& existing:m_externalImages)if(existing==image)return;
++            m_device->TransformVrImage(image,true);m_externalImages.push_back(image);
++        }
++        IDirect3DTexture9* m_background=nullptr;
++        IDirect3DSurface9* m_backgroundSurface=nullptr;
++        bool m_backgroundReady=false;
++        PortalFrameUpscaler m_upscaler;
+         D3D9DeviceEx *m_device;
+         D3D9DeviceLock m_lock;
+     };
+@@ -156,4 +234,4 @@ HRESULT __stdcall Direct3DCreateVRImpl(IDirect3DDevice9 *pDevice, IDirect3DVR9 *
+     *pInterface = new dxvk::D3D9VR(pDevice);
+ 
+     return D3D_OK;
+-}
+\ No newline at end of file
++}
+diff --git a/src/d3d9/d3d9_vr.h b/src/d3d9/d3d9_vr.h
+index b906cf7..150d81f 100644
+--- a/src/d3d9/d3d9_vr.h
++++ b/src/d3d9/d3d9_vr.h
+@@ -33,6 +33,12 @@ IDirect3DVR9 : public IUnknown{
+   virtual HRESULT STDMETHODCALLTYPE UnlockDevice() = 0;
+   virtual HRESULT STDMETHODCALLTYPE WaitDeviceIdle() = 0;
+   virtual HRESULT STDMETHODCALLTYPE GetBackBufferData(SharedTextureHolder *backBufferData) = 0;
++  virtual HRESULT STDMETHODCALLTYPE UpscaleEyes() = 0;
++  virtual HRESULT STDMETHODCALLTYPE GetMenuBackgroundData(SharedTextureHolder *data) = 0;
++  virtual HRESULT STDMETHODCALLTYPE BeginTextureSubmission() = 0;
++  virtual HRESULT STDMETHODCALLTYPE EndTextureSubmission() = 0;
++  virtual HRESULT STDMETHODCALLTYPE LockVulkanQueue() = 0;
++  virtual HRESULT STDMETHODCALLTYPE UnlockVulkanQueue() = 0;
+ };
+ 
+ #ifdef _MSC_VER
+@@ -42,4 +48,4 @@ __CRT_UUID_DECL(IDirect3DVR9, 0x7e272b32, 0xa49c, 0x46c7, 0xb1, 0xa4, 0xef, 0x52
+ #endif
+ 
+ HRESULT __stdcall Direct3DCreateVRImpl(IDirect3DDevice9 *pDevice,
+-    IDirect3DVR9 **pInterface);
+\ No newline at end of file
++    IDirect3DVR9 **pInterface);
+diff --git a/src/dxvk/dxvk_openvr.cpp b/src/dxvk/dxvk_openvr.cpp
+index 6e50535..c393a8c 100644
+--- a/src/dxvk/dxvk_openvr.cpp
++++ b/src/dxvk/dxvk_openvr.cpp
+@@ -5,7 +5,7 @@
+ #pragma GCC diagnostic ignored "-Wnon-virtual-dtor"
+ #endif
+ 
+-#include <openvr/openvr.hpp>
++#include <openvr.h>
+ 
+ using VR_InitInternalProc        = vr::IVRSystem* (VR_CALLTYPE *)(vr::EVRInitError*, vr::EVRApplicationType);
+ using VR_ShutdownInternalProc    = void  (VR_CALLTYPE *)();
