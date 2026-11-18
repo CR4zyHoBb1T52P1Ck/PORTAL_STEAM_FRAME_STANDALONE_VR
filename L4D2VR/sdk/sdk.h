@@ -295,7 +295,7 @@ struct ModelRenderInfo_t
 	int skin;
 	int body;
 	int hitboxset;
-	int instance;
+	uint16_t instance = 0xffff;
 
 	ModelRenderInfo_t()
 	{
@@ -832,7 +832,7 @@ class IModelRender
 public:
 	virtual int		DrawModel(int flags,
 								void * pRenderable,
-								int instance,
+								uint16_t instance,
 								int entity_index,
 								const void * model,
 								Vector const &origin,

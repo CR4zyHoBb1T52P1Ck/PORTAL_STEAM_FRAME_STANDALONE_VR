@@ -10,7 +10,7 @@ void VR::UpdateMenuChrome(int width,int height) {
             const int dx=std::min(x,width-1-x),dy=std::min(y,height-1-y);
             if((dx<42&&dy<7)||(dy<42&&dx<7)||(x>width*.4f&&x<width*.6f&&y<7))m_MenuChromePixels[y*width+x]=0xffffc74b;
         }
-        if(m_Overlay->SetOverlayRaw(m_MenuChrome,m_MenuChromePixels.data(),width,height,4)!=vr::VROverlayError_None)return;
+        if(UploadOverlayFile(m_MenuChrome,m_MenuChromePixels,width,height,"menu-corners.tga")!=vr::VROverlayError_None)return;
         m_MenuChromeWidth=width;m_MenuChromeHeight=height;
     }
     const auto transform=OpenVrMatrix(m_MenuTransform);
@@ -28,7 +28,7 @@ void VR::UpdateMenuPointer(int hand,const Vector& source,const Vector& destinati
         const std::string key="portal.frame.laser."+std::to_string(hand);
         m_Overlay->CreateOverlay(key.c_str(),"Portal menu pointer",&m_MenuBeam[hand]);
         if(m_MenuBeam[hand]) {
-            uint32_t color=0xfff2c832;m_Overlay->SetOverlayRaw(m_MenuBeam[hand],&color,1,1,4);
+            const std::vector<uint32_t> color{0xfff2c832};UploadOverlayFile(m_MenuBeam[hand],color,1,1,hand?"laser-right.tga":"laser-left.tga");
             m_Overlay->SetOverlayInputMethod(m_MenuBeam[hand],vr::VROverlayInputMethod_None);
             m_Overlay->SetOverlayFlag(m_MenuBeam[hand],vr::VROverlayFlags_SortWithNonSceneOverlays,false);
         m_Overlay->SetOverlayFlag(m_MenuBeam[hand],vr::VROverlayFlags_VisibleInDashboard,false);
@@ -50,9 +50,9 @@ void VR::UpdateMenuPointer(int hand,const Vector& source,const Vector& destinati
         const std::string key="portal.frame.cursor."+std::to_string(hand);
         m_Overlay->CreateOverlay(key.c_str(),"Portal menu cursor",&m_MenuDot[hand]);
         if(m_MenuDot[hand]) {
-            uint32_t pixels[32*32]{};
+            std::vector<uint32_t> pixels(32*32,0);
             for(int y=0;y<32;++y)for(int x=0;x<32;++x){const float r=std::hypot(x-15.5f,y-15.5f);if(r<14)pixels[y*32+x]=r>10?0xff000000:0xffffffff;}
-            m_Overlay->SetOverlayRaw(m_MenuDot[hand],pixels,32,32,4);
+            UploadOverlayFile(m_MenuDot[hand],pixels,32,32,hand?"cursor-right.tga":"cursor-left.tga");
             m_Overlay->SetOverlayInputMethod(m_MenuDot[hand],vr::VROverlayInputMethod_None);
             m_Overlay->SetOverlayFlag(m_MenuDot[hand],vr::VROverlayFlags_SortWithNonSceneOverlays,false);
         m_Overlay->SetOverlayFlag(m_MenuDot[hand],vr::VROverlayFlags_VisibleInDashboard,false);
@@ -188,7 +188,7 @@ void VR::UpdateComfortVignette() {
         m_Overlay->CreateOverlay("portal.frame.comfort","Portal movement comfort",&m_VignetteHandle);if(!m_VignetteHandle)return;
         std::vector<uint32_t> pixels(256*256);
         for(int y=0;y<256;++y)for(int x=0;x<256;++x){const float radius=std::hypot((x-127.5f)/127.5f,(y-127.5f)/127.5f);pixels[y*256+x]=uint32_t(std::clamp((radius-.38f)/.47f,0.f,1.f)*255)<<24;}
-        m_Overlay->SetOverlayRaw(m_VignetteHandle,pixels.data(),256,256,4);m_Overlay->SetOverlayWidthInMeters(m_VignetteHandle,1.7f);
+        UploadOverlayFile(m_VignetteHandle,pixels,256,256,"comfort-vignette.tga");m_Overlay->SetOverlayWidthInMeters(m_VignetteHandle,1.7f);
         m_Overlay->SetOverlaySortOrder(m_VignetteHandle,100);
         m_Overlay->SetOverlayFlag(m_VignetteHandle,vr::VROverlayFlags_SortWithNonSceneOverlays,false);
         m_Overlay->SetOverlayFlag(m_VignetteHandle,vr::VROverlayFlags_VisibleInDashboard,false);
@@ -220,7 +220,11 @@ void VR::UpdateFpsOverlay() {
     auto* data=static_cast<uint32_t*>(pixels);m_FpsPixels.assign(data,data+320*80);
     for(auto& p:m_FpsPixels)p=0xff000000u|((p&255)<<16)|(p&0xff00)|((p>>16)&255);
     SelectObject(dc,oldFont);DeleteObject(font);SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);
-    const auto upload=m_Overlay->SetOverlayRaw(m_FpsHandle,m_FpsPixels.data(),320,80,4);
+    // Repeated raw pixel uploads exhausted the Frame vrclient's shared-memory
+    // pool (201 outstanding blocks in the owner crash log). Send a native file
+    // path instead; two files keep an image stable while the next is decoded.
+    static unsigned slot=0;const auto name="fps-counter-"+std::to_string(slot++%2)+".tga";
+    const auto upload=UploadOverlayFile(m_FpsHandle,m_FpsPixels,320,80,name.c_str());
     static unsigned failures=0;
     if(upload!=vr::VROverlayError_None){if(failures++%30==0)PortalVrLog("FPS overlay upload failed=%d; counter hidden until recovery",upload);m_FpsImageReady=false;m_Overlay->HideOverlay(m_FpsHandle);return;}failures=0;m_FpsImageReady=true;
     m_Overlay->SetOverlayAlpha(m_FpsHandle,.85f);m_Overlay->ShowOverlay(m_FpsHandle);

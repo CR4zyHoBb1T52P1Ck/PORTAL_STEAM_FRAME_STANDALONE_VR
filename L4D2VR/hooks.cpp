@@ -31,6 +31,7 @@
 #include "gungrab.h"
 #include "modelpath.h"
 #include "modeldrawstate.h"
+#include "modelinstance.h"
 #include "twohandaim.h"
 #include "bindposecache.h"
 #include <intrin.h>
@@ -241,6 +242,20 @@ namespace
     Hook<DetachProp> s_DetachProp;
     PropInteraction::Carry s_PropCarry;
     void* s_PropPlayer=nullptr;
+    void* s_PropController=nullptr;
+    thread_local bool s_GripRelease=false;
+    struct PropReleaseVelocity {
+        bool ready=false;unsigned handle=0xffffffff;void* entity=nullptr;
+        Vector linear{0,0,0},angular{0,0,0};
+    };
+    thread_local PropReleaseVelocity s_ReleaseVelocity;
+    void ApplyPropReleaseVelocity() {
+        const auto pending=s_ReleaseVelocity;s_ReleaseVelocity={};
+        if(!pending.ready||s_PropBinding.Entity(pending.handle)!=pending.entity)return;
+        const bool applied=NativePhysics::Velocity(NativePhysics::Physics(pending.entity),pending.linear,pending.angular);
+        auto* vr=Hooks::m_VR;
+        PortalVrLog("Grip release throw applied=%d entity=%p speedMPS=%f spinDPS=%f",applied,pending.entity,sqrtf(pending.linear.LengthSqr())/vr->m_VRScale,sqrtf(pending.angular.LengthSqr()));
+    }
     thread_local void* s_PropUpdate=nullptr;
     static double PropTime(){return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();}
     bool PropHandPose(matrix3x4_t& pose) {
@@ -257,7 +272,7 @@ namespace
             const bool across=SigScanner::IsReadable(portalFlag,1)&&*reinterpret_cast<unsigned char*>(portalFlag);
             void* entity=s_PropBinding.Attached(controller);matrix3x4_t hand,object;
             if(!across&&entity&&PropHandPose(hand)&&NativePhysics::Position(NativePhysics::Physics(entity),object)) {
-                const auto target=s_PropCarry.Target(controller,entity,1,vr->WeaponHand(),PropTime(),hand,object,vr->m_VRScale);
+                const auto target=s_PropCarry.Target(controller,entity,1,vr->PropHand(),PropTime(),hand,object,vr->m_VRScale);
                 s_SetPropTarget.fOriginal(controller,PortalPose::Position(target),PortalPose::Angles(target));return;
             }
             s_PropCarry.Reset();
@@ -269,9 +284,9 @@ namespace
         unsigned handle=0xffffffff;
         Vector linear{0,0,0},angular{0,0,0};matrix3x4_t object,hand;
         const auto now=GetTickCount64();
-        bool apply=vr&&vr->m_Graphics.enhancedThrow&&vr->m_ThrowReleaseUntil&&now<=vr->m_ThrowReleaseUntil
+        bool apply=s_GripRelease&&vr&&vr->m_PropHold.throwRelease&&vr->m_Graphics.enhancedThrow&&vr->m_ThrowReleaseUntil&&now<=vr->m_ThrowReleaseUntil
             &&vr->InteractionAllowed()&&entity&&controller==s_PropCarry.controller&&entity==s_PropCarry.entity
-            &&vr->WeaponHand()==s_PropCarry.hand&&PropHandPose(hand);
+            &&vr->PropHand()==s_PropCarry.hand&&PropHandPose(hand);
         if(apply) {
             s_PropCarry.motion.Push(PropTime(),hand,vr->m_VRScale);
             const auto get=SigScanner::GetVirtualFunction(entity,Portal1::VTableIndex::kServerEntity_GetRefEHandle);
@@ -282,15 +297,16 @@ namespace
         // ownership first. Never retain or call a stale IPhysicsObject pointer.
         s_DetachProp.fOriginal(controller,clearVelocity);
         if(apply&&s_PropBinding.Entity(handle)==entity) {
-            auto* physics=NativePhysics::Physics(entity);
             linear=PropInteraction::CenterVelocity(linear,angular,PortalPose::Position(hand),PortalPose::Position(object));
             linear=PropInteraction::Limit(linear*vr->m_Graphics.throwGain,vr->m_VRScale*vr->m_Graphics.throwMaxMPS);
             angular=PropInteraction::Limit(angular*(vr->m_Graphics.throwSpin/100),1440);
             const Vector local{TwoHandAim::Dot(angular,TwoHandAim::Axis(object,0)),TwoHandAim::Dot(angular,TwoHandAim::Axis(object,1)),TwoHandAim::Dot(angular,TwoHandAim::Axis(object,2))};
-            const bool applied=NativePhysics::Velocity(physics,linear,local);
-            PortalVrLog("Controller throw applied=%d entity=%p speedMPS=%f spinDPS=%f mode=%d",applied,entity,sqrtf(linear.LengthSqr())/vr->m_VRScale,sqrtf(local.LengthSqr()),vr->m_Graphics.propGrabMode);
+            // Defer until PickupController::Shutdown has also completed its
+            // native use-entity, weapon and ownership cleanup.
+            s_ReleaseVelocity={true,handle,entity,linear,local};
         }
         if(controller==s_PropCarry.controller){s_PropCarry.Reset();s_PropPlayer=nullptr;if(vr)vr->m_ThrowReleaseUntil=0;}
+        if(controller==s_PropController){s_PropController=nullptr;if(vr)vr->m_PropHold.Detached();}
     }
 	constexpr bool kEnableAllHooks = true;
 	constexpr bool kEnableClientModeHooks = true;
@@ -638,7 +654,7 @@ namespace
 	int DrawLocalPlayerBodyDirect()
 	{
 		if (!Hooks::m_Game || !Hooks::m_VR || !s_ActiveFirstPersonBodyPass
-			|| !Hooks::m_VR->m_IsVREnabled || !Hooks::m_VR->m_FirstPersonBody)
+            || !Hooks::m_VR->m_IsVREnabled || !Hooks::m_VR->m_FirstPersonBody || !Hooks::m_Game->IsInGame())
 			return 0;
 		// The first-person copy is useful below the headset, but must never
 		// obscure forward aim. Portal/mirror world models keep their usual draw.
@@ -718,7 +734,7 @@ namespace
 		s_LocalPlayerBodyDrawOffset = trackingOffset;
 		s_DrawingLocalPlayerBodyDirect = true;
 		const int result = modelRender->DrawModel(
-			1, renderable, 0, entityIndex, model, origin, angles, 0, 0, 0);
+			1, renderable, ModelInstance::Uncached, entityIndex, model, origin, angles, 0, 0, 0);
 		s_DrawingLocalPlayerBodyDirect = wasDrawingDirect;
 		s_LocalPlayerBodyDrawOffset = previousDrawOffset;
 		static int diagnosticDraws = 0;
@@ -927,6 +943,8 @@ int Hooks::initSourceHooks()
         s_PropBinding=NativePhysics::Binding::Resolve(m_Game->m_BaseServer);
         CreateHookAt(s_SetPropTarget,s_PropBinding.setTarget,reinterpret_cast<LPVOID>(&SetPropTargetHook),"Portal1::PropTarget",false);
         CreateHookAt(s_DetachProp,s_PropBinding.detach,reinterpret_cast<LPVOID>(&DetachPropHook),"Portal1::PropDetach",false);
+        m_VR->m_PropInputSupported=s_PropBinding.shutdownPickup&&s_SetPropTarget.isCreated()&&s_DetachProp.isCreated();
+        PortalVrLog("Interaction-20 grip ownership ready=%d pickupShutdown=%p table=%p",m_VR->m_PropInputSupported,s_PropBinding.shutdownPickup,s_PropBinding.pickupTable);
         PortalVrLog("Physics-16 native prop binding target=%p detach=%p attached=%p ready=%d",s_PropBinding.setTarget,s_PropBinding.detach,s_PropBinding.getAttached,s_SetPropTarget.isCreated()&&s_DetachProp.isCreated());
 		CreateHookAt(hkUpdateObjectVM, m_Game->m_Offsets->UpdateObjectVM.address,
 			reinterpret_cast<LPVOID>(&dUpdateObjectVM), "Portal1::UpdateGrabObjectVM", false);
@@ -1057,6 +1075,21 @@ void __fastcall Hooks::dRenderView(void *ecx, void *edx, CViewSetup &originalSet
 
 	if (!m_VR->m_CreatedVRTextures)
 		return hkRenderView.fOriginal(ecx, setup, nClearFlags, whatToDraw);
+
+    if(!m_Game->IsInGame()) {
+        // Source is replacing models and entity handles. Only its normal load
+        // view may render; no recursive eye or direct avatar draw is eligible.
+        s_InlineBodyDrawEligible=s_ActiveFirstPersonBodyPass=s_DrawingLocalPlayerBodyDirect=false;
+        s_BodyViewStack.clear();s_BodyDrawTriggered=false;
+        s_NativeAvatarSourceReady=s_NativeAvatarDirectDrawn=s_AvatarPalette.valid=false;
+        s_LocalPlayerEntity=s_LocalPlayerRenderable=nullptr;s_HasLocalPlayerBodyTransform=false;
+        s_LocalWorldGunReady=false;s_LocalWorldGunEntity=s_LocalWorldGunRenderable=nullptr;
+        s_RightViewmodelRenderable=s_LeftArmRenderable=s_GunAttachmentRenderable=nullptr;
+        s_GunAttachmentModel=nullptr;s_PortalCamera={};s_PortalBlast.pending=false;
+        s_PropCarry.Reset();s_PropPlayer=s_PropController=nullptr;m_VR->m_PropHold.Detached();
+        m_VR->m_RenderedNewFrame=false;m_VR->m_GrabPoseValid=m_VR->m_PickupAimValid=false;
+        return hkRenderView.fOriginal(ecx,setup,nClearFlags,whatToDraw);
+    }
 
 	//VPanel* g_pFullscreenRootPanel = *(VPanel**)(m_Game->m_Offsets->g_pFullscreenRootPanel.address);
 
@@ -1277,7 +1310,7 @@ bool __fastcall Hooks::dCreateMove(void *ecx, void *edx, float flInputSampleTime
 		// Keep IN_USE and the sampled hand on the same tick. PlayerUse and the
 		// grab solver scope the hand override; portal physics must keep seeing
 		// the real player eye pose. Command view angles remain HMD-driven.
-        if(m_VR->m_Weapon.stowed||m_VR->m_Weapon.fireBlocked)cmd->buttons&=~(IN_ATTACK|IN_ATTACK2);
+        if(m_VR->m_Weapon.stowed||m_VR->m_Weapon.fireBlocked||m_VR->m_PropHold.attached)cmd->buttons&=~(IN_ATTACK|IN_ATTACK2);
 		const bool useHeld = m_VR->PressedDigitalAction(m_VR->m_ActionUse);
 		m_VR->SnapshotGrabPose();
 		cmd->buttons = useHeld ? (cmd->buttons | IN_USE) : (cmd->buttons & ~IN_USE);
@@ -1611,11 +1644,16 @@ static void DrawTrackedModel(void *ecx, void *state, const ModelRenderInfo_t& in
         lightingOrigin=s_PortalCamera.Map(*info.pLightingOrigin);
         mapped.pLightingOrigin=&lightingOrigin;
     }
-    Hooks::hkDrawModelExecute.fOriginal(ecx,state,mapped,bones);
+    ModelDrawState::State mappedState;
+    const bool mappedStateValid=state&&info.pModelToWorld&&SigScanner::IsReadable(reinterpret_cast<uintptr_t>(state),sizeof(mappedState))
+        &&ModelDrawState::Copy(state,mappedState,*reinterpret_cast<void**>(state),info.pRenderable,modelToWorld);
+    Hooks::hkDrawModelExecute.fOriginal(ecx,mappedStateValid?&mappedState:state,mapped,bones);
 }
 
 void Hooks::dDrawModelExecute(void *ecx, void *edx, void *state, const ModelRenderInfo_t &info, void *pCustomBoneToWorld)
 {
+    if(!m_VR||!m_VR->m_IsVREnabled||!m_Game||!m_Game->IsInGame())
+        return hkDrawModelExecute.fOriginal(ecx,state,info,pCustomBoneToWorld);
 	// Work on a copy: Source shares its cached matrices with attachments and
 	// other eyes. Rewriting that cache would accumulate the controller transform.
     const auto *bones = static_cast<const matrix3x4_t *>(pCustomBoneToWorld);
@@ -2129,6 +2167,7 @@ void __fastcall Hooks::dPlayerPortalled(void* ecx, void* edx, void* portal)
 	m_VR->m_SetupOrigin = PortalPose::Position(HandPose::Concat(transform,
 		PortalPose::Frame(m_VR->m_SetupOrigin, {0,0,0})));
 	s_PropCarry.Reset();s_PropPlayer=nullptr;
+	m_VR->m_PropHold.CancelThrow();
 	m_VR->m_HandContact[0]=m_VR->m_HandContact[1]={};m_VR->m_ThrowReleaseUntil=0;
 	m_VR->m_CameraCollisionOffset = {0,0,0};
 	m_VR->m_CameraBlocked = false;
@@ -2144,6 +2183,18 @@ void __fastcall Hooks::dPlayerPortalled(void* ecx, void* edx, void* portal)
 
 void __fastcall Hooks::dPlayerUse(void* ecx, void* edx)
 {
+	if(m_VR->m_PropHold.release&&m_Game->GetLocalPlayerIndex()>0&&ServerEntityIndex(ecx)==m_Game->GetLocalPlayerIndex()) {
+        void* parent=s_PropBinding.PickupOwner(s_PropController,ecx);
+        if(parent) {
+            m_VR->SnapshotGrabPose();s_PropPlayer=ecx;s_ReleaseVelocity={};s_GripRelease=true;
+            reinterpret_cast<void(__thiscall*)(void*,bool)>(s_PropBinding.shutdownPickup)(parent,false);
+            s_GripRelease=false;ApplyPropReleaseVelocity();
+            s_PropCarry.Reset();s_PropPlayer=s_PropController=nullptr;m_VR->m_PropHold.Detached();m_VR->m_ThrowReleaseUntil=0;
+            PortalVrLog("Native pickup shutdown completed on grip release");
+            return;
+        }
+        m_VR->m_PropHold.Detached();s_PropCarry.Reset();s_PropPlayer=s_PropController=nullptr;
+    }
 	const bool previous = m_VR->m_OverrideEyeAngles;
 	m_VR->m_OverrideEyeAngles = true;
 	hkPlayerUse.fOriginal(ecx);
@@ -2153,7 +2204,7 @@ void __fastcall Hooks::dPlayerUse(void* ecx, void* edx)
 void* __fastcall Hooks::dFindUseEntity(void* ecx, void* edx)
 {
 	if (!m_Game || !m_VR || !m_VR->m_IsVREnabled
-		|| !m_VR->m_OverrideEyeAngles || !m_VR->WeaponTracked()
+		|| !m_VR->m_OverrideEyeAngles || !m_VR->m_GrabPoseValid
 		|| m_Game->GetLocalPlayerIndex() <= 0
 		|| ServerEntityIndex(ecx) != m_Game->GetLocalPlayerIndex())
 		return hkFindUseEntity.fOriginal(ecx);
@@ -2387,7 +2438,7 @@ Vector* __fastcall Hooks::dEyePosition(void* ecx, void* edx, Vector* eyePos)
 	const int index = ServerEntityIndex(ecx);
 	const bool isLocalPlayer = localIndex > 0 && localIndex == index;
 	if (m_VR->m_IsVREnabled && isLocalPlayer
-		&& m_VR->WeaponTracked()
+		&& m_VR->m_GrabPoseValid
 		&& m_VR->m_OverrideEyeAngles)
 	{
 		Vector hand;
@@ -2424,10 +2475,11 @@ bool __fastcall Hooks::dUpdateObject(void* ecx, void* edx, void* pPlayer, float 
     const auto previous=s_PropUpdate;s_PropUpdate=observe?ecx:nullptr;
     if(observe) {
         s_PropPlayer=pPlayer;void* entity=s_PropBinding.Attached(ecx);matrix3x4_t hand,object;
+        if(entity&&s_PropBinding.PickupOwner(ecx,pPlayer)){s_PropController=ecx;m_VR->m_PropHold.Attach();}
         if(entity&&PropHandPose(hand)&&NativePhysics::Position(NativePhysics::Physics(entity),object)) {
             static unsigned observations=0;
-            if(s_PropCarry.controller!=ecx&&observations++<32)PortalVrLog("Native prop carry controller=%p entity=%p mode=%d hand=%d initialGapCM=%f",ecx,entity,m_VR->m_Graphics.propGrabMode,m_VR->WeaponHand(),sqrtf((PortalPose::Position(object)-PortalPose::Position(hand)).LengthSqr())/m_VR->m_VRScale*100);
-            s_PropCarry.Target(ecx,entity,m_VR->m_Graphics.propGrabMode,m_VR->WeaponHand(),PropTime(),hand,object,m_VR->m_VRScale);
+            if(s_PropCarry.controller!=ecx&&observations++<32)PortalVrLog("Native prop carry controller=%p entity=%p mode=%d hand=%d initialGapCM=%f",ecx,entity,m_VR->m_Graphics.propGrabMode,m_VR->PropHand(),sqrtf((PortalPose::Position(object)-PortalPose::Position(hand)).LengthSqr())/m_VR->m_VRScale*100);
+            s_PropCarry.Target(ecx,entity,m_VR->m_Graphics.propGrabMode,m_VR->PropHand(),PropTime(),hand,object,m_VR->m_VRScale);
         } else s_PropCarry.Reset();
     } else if(s_PropCarry.controller==ecx)s_PropCarry.Reset();
     const bool value = hkUpdateObject.fOriginal(ecx, pPlayer, flError);
@@ -2480,7 +2532,7 @@ QAngle& __fastcall Hooks::dEyeAngles(void* ecx, void* edx) {
 			auto &vrPlayer = m_Game->m_PlayersVRInfo[index];
 			if (m_VR->m_OverrideEyeAngles
 				&& m_VR->m_IsVREnabled && localIndex > 0 && localIndex == index
-				&& m_VR->WeaponTracked())
+				&& m_VR->m_GrabPoseValid)
 			{
 				static bool logged = false;
 				if (!logged)

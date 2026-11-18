@@ -172,6 +172,34 @@ struct Rig {
             }
         }
     }
+    void FitLegs(matrix3x4_t* bones,const matrix3x4_t feet[2],Vector forward,float physicalCrouch,float unit,bool stable) const {
+        for(int h=0;h<2;++h) {
+            const auto hip=TwoHandAim::Position(bones[leg[h][0]]);
+            const auto knee=TwoHandAim::Position(bones[leg[h][1]]);
+            const float upper=sqrtf((knee-hip).LengthSqr());
+            const float lower=sqrtf((TwoHandAim::Position(bones[leg[h][2]])-knee).LengthSqr());
+            auto target=TwoHandAim::Position(feet[h]);
+            if(stable) {
+                // Source's jump animation tucks its ankles up toward the pelvis.
+                // Those animated ankles are not tracked feet. Keep them below
+                // the fitted hips; real physical crouching may bend further.
+                const float crouch=std::clamp(-physicalCrouch*unit,0.f,upper*.75f);
+                const float standing=std::max((upper+lower)*.82f,lower+unit*.5f);
+                const float drop=std::max(standing-crouch,(upper+lower)*.15f);
+                target.z=std::min(target.z,hip.z-drop);
+            }
+            Limb(bones,leg[h],target,forward,1);
+            auto ankle=feet[h];
+            if(stable) {
+                // TwoBone clamps unreachable targets. Restoring the OLD ankle
+                // position afterwards tears the shin/foot skin apart. Restore
+                // only its attitude and keep the connected solved endpoint.
+                const auto endpoint=TwoHandAim::Position(bones[leg[h][2]]);
+                for(int r=0;r<3;++r)ankle[r][3]=endpoint[r];
+            }
+            ReanchorBranch(bones,leg[h][2],ankle);
+        }
+    }
     float FitUpperBody(matrix3x4_t* bones,const Vector& headTarget,Vector forward,float unitsPerM,
         float spanCM,float widthCM,float dropCM,float backCM,float yaw,float reach,float crouchCM=0,bool upright=true,bool palmAnchor=false,float handScale=1,float palmDepth=1,bool rigid=false,float torsoScale=1,float clearanceCM=0) const {
         if(!bones||!TwoHandAim::Finite(headTarget)||!std::isfinite(unitsPerM)||unitsPerM<1)return reach;
@@ -199,7 +227,7 @@ struct Rig {
             for(int i=0;i<count;++i)if(below[spine][i])bones[i]=HandPose::Concat(neutral,bind[i]);
         }
         if(!rigid){const float crouch=std::clamp(crouchCM*unit,-30.f,0.f);Shift(bones,hips,{0,0,crouch*.65f});}
-        for(int h=0;h<2;++h){Limb(bones,leg[h],TwoHandAim::Position(feet[h]),forward,1);ReanchorBranch(bones,leg[h][2],feet[h]);}
+        FitLegs(bones,feet,forward,crouchCM,unit,rigid);
         const auto original=(TwoHandAim::Position(bones[arm[0][0]])+TwoHandAim::Position(bones[arm[1][0]]))*.5f;
         // Move the upper torso and shoulders together; hands are subsequently
         // solved to their exact controllers. Native feet/hips remain inferred.

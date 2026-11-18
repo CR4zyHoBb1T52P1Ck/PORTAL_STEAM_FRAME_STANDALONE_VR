@@ -103,6 +103,7 @@ void VR::RefreshSystemFocus(bool sampleActions) {
     if(!m_SystemFocus.focused)HideOwnedOverlays();
 }
 void VR::ReleaseMenuInput() {
+    m_PropHold.Suspend();
     m_ThrowReleaseUntil=0;m_HandContact[0]=m_HandContact[1]={};
     m_Weapon.Suspend();m_LegacyHapticUntil[0]=m_LegacyHapticUntil[1]=0;m_WeaponConsumesGrip=true;m_UseGripBlocked[0]=m_UseGripBlocked[1]=true;
     m_OptionalSupportActive=false;m_OptionalGripState.active=false;m_OptionalGripState.wasPressed=true;
@@ -270,17 +271,38 @@ void VR::ChangeGraphicsSetting(int row,int direction) {
     m_MenuHoveredRow=-1;m_GraphicsDirty=true;
     m_MenuNavNext=GetTickCount64()+220;
 }
+vr::EVROverlayError VR::UploadOverlayFile(vr::VROverlayHandle_t handle,const std::vector<uint32_t>& pixels,int width,int height,const char* name) {
+    if(!g_D3DVR9||width<1||height<1||pixels.size()!=size_t(width)*height)return vr::VROverlayError_InvalidParameter;
+    const auto result=g_D3DVR9->UploadOverlayPixels(handle,pixels.data(),width,height);
+    static unsigned audits=0;
+    if(audits++<12||FAILED(result))PortalVrLog("GPU overlay raster name=%s size=%dx%d result=%08x",name,width,height,unsigned(result));
+    return SUCCEEDED(result)?vr::VROverlayError_None:vr::VROverlayError_RequestFailed;
+}
+void VR::OverlayTextureSubmitted(vr::VROverlayHandle_t handle,vr::EVROverlayError result) {
+    if(result!=vr::VROverlayError_None) {
+        PortalVrLog("GPU overlay submission handle=%llu error=%d",handle,result);
+        if(handle==m_GraphicsStagingHandle&&m_MenuRaster.pending){m_MenuRaster.Failed(GetTickCount64());m_GraphicsDirty=true;}
+        return;
+    }
+    // Vulkan SetOverlayTexture completes the upload request synchronously.
+    // Commit only the staged image, preserving the front on failure. Unlike
+    // SetOverlayRaw, this path must not wait for an ImageLoaded file event.
+    if(handle==m_GraphicsStagingHandle&&m_MenuRaster.pending) {
+        if(!m_GraphicsOpen) {
+            std::swap(m_GraphicsHandle,m_GraphicsStagingHandle);m_MenuRaster.Loaded();m_MenuImageFailures=0;
+            return; // a pending upload must never reopen a menu the user closed
+        }
+        const auto shown=m_Overlay->ShowOverlay(m_GraphicsStagingHandle);
+        if(shown!=vr::VROverlayError_None){m_MenuRaster.Failed(GetTickCount64());m_GraphicsDirty=true;return;}
+        m_Overlay->HideOverlay(m_GraphicsHandle);std::swap(m_GraphicsHandle,m_GraphicsStagingHandle);m_MenuRaster.Loaded();m_MenuImageFailures=0;
+        if(!m_MenuUploadLogged){PortalVrLog("GPU settings panel front ready page=%d",m_MenuRaster.shownPage);m_MenuUploadLogged=true;}
+    }
+}
 vr::EVROverlayError VR::UploadMenuImageFromFile() {
-    char directory[MAX_PATH]{};if(!GetRuntimeBaseDirectory(directory,sizeof(directory)))return vr::VROverlayError_UnableToLoadFile;
-    const auto path=std::filesystem::path(directory)/"VR"/("menu-panel-"+std::to_string(1-m_MenuRaster.front)+".tga");
-    const auto bytes=MenuImage::Tga(m_GraphicsPixels,VrMenu::Width,VrMenu::Height);
-    if(bytes.empty())return vr::VROverlayError_InvalidParameter;
-    std::ofstream file(path,std::ios::binary|std::ios::trunc);file.write(reinterpret_cast<const char*>(bytes.data()),bytes.size());file.close();
-    if(!file)return vr::VROverlayError_UnableToLoadFile;
-    const auto native=MenuImage::NativePath(path.string());
-    const auto result=m_Overlay->SetOverlayFromFile(m_GraphicsStagingHandle,native.c_str());
+    const auto name="menu-panel-"+std::to_string(1-m_MenuRaster.front)+".tga";
+    const auto result=UploadOverlayFile(m_GraphicsStagingHandle,m_GraphicsPixels,VrMenu::Width,VrMenu::Height,name.c_str());
     if(result==vr::VROverlayError_None)m_MenuFileTransport=true;
-    if(!m_MenuUploadLogged||(result!=vr::VROverlayError_None&&m_MenuImageFailures%20==0))PortalVrLog("VR settings lossless file upload bytes=%u result=%d",unsigned(bytes.size()),result);
+    if(!m_MenuUploadLogged||(result!=vr::VROverlayError_None&&m_MenuImageFailures%20==0))PortalVrLog("VR settings file transport image=%dx%d result=%d",VrMenu::Width,VrMenu::Height,result);
     return result;
 }
 void VR::UpdateGraphicsMenu() {
@@ -301,12 +323,12 @@ void VR::UpdateGraphicsMenu() {
         }
         if(event.eventType==vr::VREvent_ImageFailed) {
             PortalVrLog("VR settings back image failed halfRaster=%d; front preserved",m_MenuHalfRaster);
-            m_MenuRaster.Failed(now);m_GraphicsDirty=true;m_MenuFileTransport=false;++m_MenuImageFailures;
+            m_MenuRaster.Failed(now);m_GraphicsDirty=true;m_MenuFileTransport=true;++m_MenuImageFailures;
         }
     }
     if(m_MenuRaster.pending&&now-m_MenuRaster.started>2000) {
         PortalVrLog("VR settings back upload timed out; front preserved");m_MenuRaster.Failed(now);
-        m_GraphicsDirty=true;m_MenuFileTransport=false;++m_MenuImageFailures;
+        m_GraphicsDirty=true;m_MenuFileTransport=true;++m_MenuImageFailures;
     }
     if(m_GraphicsDirty&&m_MenuRaster.Begin(now,int(m_MenuPage))) {
         const auto& image=m_VKLeftEye.m_VulkanData;
@@ -339,11 +361,10 @@ void VR::UpdateGraphicsMenu() {
         else if(m_MenuPage==VrMenu::Body)output="Native Chell skin, complete arms/hands. Head + controllers; legs inferred.";
         m_GraphicsPixels=VrMenu::Paint(m_Graphics,m_MenuPage,m_GraphicsSelected,active,m_GraphicsStatus,output);
         if(m_GraphicsPixels.empty()){PortalVrLog("VR settings paint failed: empty raster");m_MenuRaster.Failed();return;}
-        // Raw uploads can fail transiently while the Frame compositor sleeps.
-        // Keep the front, retry after wake, and use a full-resolution lossless
-        // file transport after repeated rejection rather than staying blank.
-        auto error=m_MenuFileTransport?UploadMenuImageFromFile():m_Overlay->SetOverlayRaw(m_GraphicsStagingHandle,m_GraphicsPixels.data(),VrMenu::Width,VrMenu::Height,4);
-        if(error!=vr::VROverlayError_None&&++m_MenuImageFailures>=3)error=UploadMenuImageFromFile();
+        // The Frame client can retain every SetOverlayRaw shared-memory block.
+        // Never fall back to raw for a changing image: exhaustion is process-wide.
+        auto error=UploadMenuImageFromFile();
+        if(error!=vr::VROverlayError_None)++m_MenuImageFailures;
         if(error!=vr::VROverlayError_None) {
             if(m_MenuImageFailures<=3||m_MenuImageFailures%20==0)PortalVrLog("VR settings upload rejected error=%d; retrying silently; front preserved",error);
             m_MenuRaster.Failed(now);m_GraphicsDirty=true;

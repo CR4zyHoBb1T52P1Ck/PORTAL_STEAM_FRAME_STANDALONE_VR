@@ -9,6 +9,7 @@
 #include "sigscanner.h"
 #include "activeweapon.h"
 #include "debuglog.h"
+#include "sourceload.h"
 #include "trace.h"
 #include "../dxvk/src/d3d9/d3d9_vr.h"
 #include <Psapi.h>
@@ -373,7 +374,10 @@ int Game::GetLocalPlayerIndex()
 bool Game::IsInGame()
 {
     if (IEngineClient *engineClient = GetEngineClient())
-        return engineClient->IsInGame();
+    {
+        static const auto loading=SourceLoad::Binding::Resolve(engineClient);
+        return engineClient->IsInGame()&&!loading.Active();
+    }
 
     return GetLocalPortalPlayer() != nullptr;
 }

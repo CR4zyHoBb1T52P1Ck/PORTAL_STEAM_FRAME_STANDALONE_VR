@@ -513,6 +513,7 @@ void VR::SubmitVRTextures()
     if(!external){PortalVrLog("External texture queue acquisition failed; frame skipped");m_RenderedNewFrame=false;return;}
     if (m_Overlay)
     {
+        g_D3DVR9->SubmitOverlayTextures();
         if (desktopReady && m_SystemFocus.focused && (!eyeFrame || m_Game->IsCursorVisible() || m_GraphicsOpen) && kEnableVrMenuSubmission)
         {
             if (!m_Overlay->IsOverlayVisible(m_MainMenuHandle) && !m_GraphicsOpen)
@@ -714,8 +715,9 @@ bool VR::PressedDigitalAction(vr::VRActionHandle_t &actionHandle, bool checkIfAc
 {
     if(!m_SystemFocus.Allowed() || GetTickCount64()<m_HandSwitchSuppressUntil) return false;
     const bool fire=actionHandle==m_ActionPrimaryAttack||actionHandle==m_ActionSecondaryAttack;
-    if(fire&&(m_Weapon.stowed||m_Weapon.fireBlocked))return false;
+    if(fire&&(m_Weapon.stowed||m_Weapon.fireBlocked||m_PropHold.attached))return false;
     if(actionHandle==m_ActionUse) {
+        if(HandControlledProps())return m_PropHold.use&&!m_PropHold.release;
         if(m_WeaponConsumesGrip||m_Weapon.blocked[m_Weapon.hand]||m_UseGripBlocked[m_Weapon.hand])return false;
         if(m_Weapon.hand==0)return m_GripPressed[0]&&!m_Weapon.blocked[0];
     }
@@ -820,7 +822,7 @@ bool VR::UpdateOptionalGunSupport(matrix3x4_t *target)
     const auto anchor=HandPose::Concat(controller,m_SupportFromController);
     const float distance=m_OptionalSupportActive?sqrtf((WeaponPosition(true)-TwoHandAim::Position(anchor)).LengthSqr()):hit.distance;
     const bool was=m_OptionalSupportActive;
-    const bool enabled=m_LeftHandGunGrip&&m_IsVREnabled&&m_SystemFocus.Allowed()&&!m_GraphicsOpen&&!m_Game->IsCursorVisible()&&!m_Weapon.stowed;
+    const bool enabled=m_LeftHandGunGrip&&m_IsVREnabled&&m_SystemFocus.Allowed()&&!m_GraphicsOpen&&!m_Game->IsCursorVisible()&&!m_Weapon.stowed&&m_PropHold.hand<0;
     const bool tracked=m_ActionStateFresh&&m_LeftControllerPose.isValid&&m_RightControllerPose.isValid
         &&(WeaponPosition(true)-WeaponPosition()).LengthSqr()>=m_VRScale*m_VRScale*.0036f;
     m_OptionalSupportActive=m_OptionalGripState.Update(enabled,tracked,m_SupportLastSeen&&hit.valid,
@@ -855,7 +857,9 @@ void VR::UpdateWeaponHandling() {
         if(m_Graphics.holster&&shoulderNear[h]&&!m_ShoulderHover[h])WeaponHaptic(h,.65f,m_Graphics.holsterHover);
         m_ShoulderHover[h]=shoulderNear[h];
     }
-    const auto event=m_Weapon.Update(m_GripPressed,tracked,shoulderNear,m_OptionalSupportActive,m_Graphics.holster,m_Graphics.transfer);
+    bool gunGrip[2]={m_GripPressed[0],m_GripPressed[1]};
+    if(m_PropHold.hand>=0)gunGrip[m_PropHold.hand]=false;
+    const auto event=m_Weapon.Update(gunGrip,tracked,shoulderNear,m_OptionalSupportActive,m_Graphics.holster,m_Graphics.transfer);
     if(!m_Graphics.holster)m_Weapon.stowed=false;
     if(event==WeaponHandling::Stow) {
         const auto p=m_Weapon.hand==0?GetLeftControllerAbsPos():GetRightControllerAbsPos();
@@ -889,6 +893,15 @@ void VR::UpdateWeaponHandling() {
         if(!m_GripPressed[h])m_UseGripBlocked[h]=false;
         else if(m_WeaponConsumesGrip)m_UseGripBlocked[h]=true;
     }
+}
+
+void VR::UpdatePropInput() {
+    const bool tracked[2]={m_ActionStateFresh&&m_LeftControllerPose.isValid,m_ActionStateFresh&&m_RightControllerPose.isValid};
+    bool eligible[2]{};
+    for(int h=0;h<2;++h)eligible[h]=!m_UseGripBlocked[h]&&!m_Weapon.blocked[h]
+        &&!(m_Graphics.holster&&m_ShoulderHover[h])&&!m_OptionalSupportActive;
+    m_PropHold.Step(HandControlledProps()&&InteractionAllowed()&&GetTickCount64()>=m_HandSwitchSuppressUntil,m_GripPressed,tracked,eligible);
+    if(m_PropHold.release)m_ThrowReleaseUntil=m_PropHold.throwRelease?GetTickCount64()+300:0;
 }
 
 void VR::ProcessInput()
@@ -965,6 +978,7 @@ void VR::ProcessInput()
     }
 
     UpdateWeaponHandling();
+    UpdatePropInput();
     if (PressedDigitalAction(m_ActionPrimaryAttack))
     {
         m_Game->ClientCmd_Unrestricted("+attack");
@@ -1006,7 +1020,7 @@ void VR::ProcessInput()
     // command on an edge. CreateMove also mirrors this state into IN_USE so
     // the pickup controller sees a stable button during the same tick.
     const bool useHeld = PressedDigitalAction(m_ActionUse);
-    if(useHeld&&!m_UseCommandHeld)WeaponHaptic(m_Weapon.hand,.65f,m_Graphics.grabHaptics);
+    if(useHeld&&!m_UseCommandHeld)WeaponHaptic(PropHand(),.65f,m_Graphics.grabHaptics);
     // Publish the controller pose as soon as the action state is sampled. The
     // server-side grab callbacks can run before the next CreateMove callback;
     // keeping this snapshot here prevents that first pickup tick from falling
@@ -1014,8 +1028,6 @@ void VR::ProcessInput()
     SnapshotGrabPose();
     if (useHeld != m_UseCommandHeld)
     {
-        if(InteractionAllowed()&&!m_WeaponConsumesGrip&&(useHeld||!m_GripPressed[m_Weapon.hand])
-            &&GetTickCount64()-m_LastCarryUpdate<200)m_ThrowReleaseUntil=GetTickCount64()+300;
         m_Game->ClientCmd_Unrestricted(useHeld ? "+use" : "-use");
         m_UseCommandHeld = useHeld;
     }
@@ -1357,13 +1369,15 @@ void VR::UpdateAutoCalibration()
 
 void VR::SnapshotGrabPose()
 {
-    m_GrabPoseValid = WeaponTracked();
-    m_GrabControllerPos = WeaponPosition();
+    const bool controlled=HandControlledProps(),left=PropHand()==0;
+    m_GrabPoseValid = controlled?PropHandTracked():WeaponTracked();
+    m_GrabControllerPos = controlled?(left?GetLeftHandAbsPos():GetRightHandAbsPos()):WeaponPosition();
     // Carry forward from the visible wrist in the same aim orientation as the
     // gun. The uncorrected grip direction is 30 degrees higher on this binding.
-    m_GrabControllerAng = PickupTrace::CarryAngles(WeaponForward(),WeaponUp());
+    m_GrabControllerAng = PickupTrace::CarryAngles(controlled?(left?m_LeftControllerForward:m_RightControllerForward):WeaponForward(),controlled?(left?m_LeftControllerUp:m_RightControllerUp):WeaponUp());
     m_GrabHandRelative = PortalPose::RelativeHand(
         m_GrabControllerPos - m_SetupOrigin, m_GrabControllerAng, m_HmdAngAbs);
+    if(controlled){m_PickupAimValid=m_GrabPoseValid;m_PickupAimRelative=m_GrabHandRelative;return;}
     // Selection follows the visible gun's centerline. Carry physics continues
     // to use the wrist snapshot above, so acquiring a prop does not move it.
     Vector aimOrigin,aimDirection;
@@ -1399,7 +1413,7 @@ void VR::UpdateHandContacts() {
         auto& state=m_HandContact[h];const bool physicalLeft=h==0,logicalLeft=physicalLeft!=m_LeftHanded;
         const auto& tracked=logicalLeft?m_LeftControllerPose:m_RightControllerPose;
         const bool gunHand=!m_Weapon.stowed&&m_PortalAimLastSeen&&(physicalLeft==primaryLeft||m_OptionalSupportActive);
-        const bool carrying=physicalLeft==primaryLeft&&now-m_LastCarryUpdate<250;
+        const bool carrying=(logicalLeft==(PropHand()==0))&&m_PropHold.attached;
         if(!tracked.isValid||gunHand||carrying){state={};continue;}
         if(now<state.next)continue;
         const auto raw=GetAvatarHandFrame(physicalLeft,false);const auto target=TwoHandAim::Position(raw);

@@ -59,7 +59,7 @@ def install(game,dry=False):
  stamp=datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
  archive=safe(game,'.portal-frame-backups/'+stamp);archive.mkdir(parents=True)
  before={name:safe(game,name).read_bytes() if safe(game,name).exists() else None for name in updates}
- journal={'version':'v0.1.0-beta.1','before':{k:None if v is None else digest(v) for k,v in before.items()},'after':{k:digest(v) for k,v in updates.items()},'status':'prepared'}
+ journal={'version':manifest.get('version','unknown'),'before':{k:None if v is None else digest(v) for k,v in before.items()},'after':{k:digest(v) for k,v in updates.items()},'status':'prepared'}
  for name,data in before.items():
   if data is not None:p=archive/'files'/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(data)
  log=archive/'installation.json';log.write_text(json.dumps(journal,indent=2));written=[]

@@ -1,21 +1,21 @@
 # PORTAL_STEAM_FRAME_STANDALONE_VR
 The goal is simple. Portal in your pocket. Or backpack.... Hardcase? Whatever. I wanted Portal VR on the go. So here it is.
 
-## v0.1.0-beta.1 — first public standalone beta
+## v0.1.0-beta.2 — first public standalone beta
 
 Portal running locally in full VR on Steam Frame: tracked head and controllers,
 native Chell hands/body, portal gun, two-hand aiming, shoulder holstering,
 hand switching, body calibration and a movable VR settings panel.
-This is the **Physics-16 development build**, published November 17, 2026.
+This is the **Audit-21 development build**, published November 18, 2026.
 It is a community mod and is not affiliated with Valve.
 
-**This is a beta. A crash was reported in the latest playtest and remains under
-investigation.** Not all new physics features were tested. Use the game's save
+**This is a beta. The captured body-lighting crash path has been fixed. A later
+headset power-off remains unexplained.** Not all new physics features were tested. Use the game's save
 system regularly. Portal traversal was observed in the logs; funneling and all
 momentum/carry combinations are not yet comprehensively qualified. No 72/90 FPS
 guarantee is made. Performance varies with scene, settings and recording.
 
-Download **Portal-Frame-VR-v0.1.0-beta.1.zip** from
+Download **Portal-Frame-VR-v0.1.0-beta.2.zip** from
 [Releases](https://github.com/CR4zyHoBb1T52P1Ck/PORTAL_STEAM_FRAME_STANDALONE_VR/releases).
 The source checkout is for development; the release ZIP includes the compiled DLL.
 

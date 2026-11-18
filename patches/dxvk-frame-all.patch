@@ -253,18 +253,21 @@ index 9713399..5bf2310 100644
  	return result;
    }
 diff --git a/src/d3d9/d3d9_vr.cpp b/src/d3d9/d3d9_vr.cpp
-index 8ed15b0..9b7f511 100644
+index 8ed15b0..a273d0a 100644
 --- a/src/d3d9/d3d9_vr.cpp
 +++ b/src/d3d9/d3d9_vr.cpp
-@@ -9,6 +9,7 @@
+@@ -9,6 +9,10 @@
  
  #include "L4D2VR/game.h"
  #include "L4D2VR/vr.h"
 +#include "L4D2VR/sgsr-d3d9-interop.h"
++#include "L4D2VR/overlaypixels.h"
++#include <map>
++#include <memory>
  
  namespace dxvk {
  
-@@ -20,6 +21,11 @@ namespace dxvk {
+@@ -20,6 +24,11 @@ namespace dxvk {
              : m_device(static_cast<D3D9DeviceEx *>(pDevice))
          {}
  
@@ -276,7 +279,7 @@ index 8ed15b0..9b7f511 100644
          HRESULT STDMETHODCALLTYPE QueryInterface(
              REFIID riid,
              void **ppvObject)
-@@ -79,22 +85,13 @@ namespace dxvk {
+@@ -79,22 +88,13 @@ namespace dxvk {
                  return D3DERR_INVALIDCALL;
  
              auto *tex = static_cast<D3D9Surface *>(pSurface)->GetCommonTexture();
@@ -303,7 +306,7 @@ index 8ed15b0..9b7f511 100644
  
              return D3D_OK;
          }
-@@ -122,27 +119,108 @@ namespace dxvk {
+@@ -122,27 +122,160 @@ namespace dxvk {
  
          HRESULT STDMETHODCALLTYPE GetBackBufferData(SharedTextureHolder* backBufferData)
          {
@@ -389,10 +392,18 @@ index 8ed15b0..9b7f511 100644
 +                AddExternalImage(upscaled?m_upscaler.Surface(0):vr->m_D9LeftEyeSurface);
 +                AddExternalImage(upscaled?m_upscaler.Surface(1):vr->m_D9RightEyeSurface);
 +            }
++            for(const auto& entry:m_overlays)if(entry.second->dirty)AddExternalImage(entry.second->surface);
 +            if(m_lastExternalCount!=int(m_externalImages.size())) {
 +                m_lastExternalCount=int(m_externalImages.size());
-+                PortalVrLog("Vulkan bridge imageCount=%d submitLayout=TRANSFER_SRC_OPTIMAL queue=serialized restore=after-submit",m_lastExternalCount);
-+                for(const auto& image:m_externalImages)PortalVrLog("Vulkan bridge image=%llu size=%ux%u samples=%u normalLayout=%d",uint64_t(image->handle()),image->info().extent.width,image->info().extent.height,unsigned(image->info().sampleCount),int(image->info().layout));
++                // FPS overlay dirtiness alternates this count every second.
++                // Keep initial/periodic evidence without opening a log file for
++                // the same image descriptors repeatedly. No session deadline.
++                const auto now=GetTickCount64();
++                if(++m_bridgeChanges<=8||now>=m_nextBridgeLog) {
++                    m_nextBridgeLog=now+10000;
++                    PortalVrLog("Vulkan bridge imageCount=%d submitLayout=TRANSFER_SRC_OPTIMAL queue=serialized restore=after-submit changes=%llu",m_lastExternalCount,m_bridgeChanges);
++                    for(const auto& image:m_externalImages)PortalVrLog("Vulkan bridge image=%llu size=%ux%u samples=%u normalLayout=%d",uint64_t(image->handle()),image->info().extent.width,image->info().extent.height,unsigned(image->info().sampleCount),int(image->info().layout));
++                }
 +            }
 +            // One complete wait covers render, resolves, upscaling and barriers.
 +            const auto waitStart=std::chrono::steady_clock::now();
@@ -405,12 +416,56 @@ index 8ed15b0..9b7f511 100644
 +            for(const auto& image:m_externalImages)m_device->TransformVrImage(image,false);
 +            m_externalImages.clear();
 +            return result;
++        }
++        HRESULT STDMETHODCALLTYPE UploadOverlayPixels(uint64_t handle,const uint32_t* pixels,uint32_t width,uint32_t height) {
++            // D3D uploads happen before BeginTextureSubmission owns the native
++            // queue. Reuse each image; do not allocate a raw IPC block per edit.
++            if(m_queueLocked||!handle||!pixels||!width||!height||width>4096||height>4096)return D3DERR_INVALIDCALL;
++            auto found=m_overlays.find(handle);
++            if(found==m_overlays.end()||found->second->width!=width||found->second->height!=height) {
++                if(m_overlays.size()>=16&&found==m_overlays.end())return E_OUTOFMEMORY;
++                if(m_retiredOverlays.size()>=16)return E_OUTOFMEMORY;
++                auto image=std::make_unique<OverlayImage>();image->width=width;image->height=height;
++                auto status=m_device->CreateTexture(width,height,1,D3DUSAGE_DYNAMIC,D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,&image->texture,nullptr);
++                if(FAILED(status))return status;
++                status=image->texture->GetSurfaceLevel(0,&image->surface);if(FAILED(status))return status;
++                if(found!=m_overlays.end())m_retiredOverlays.push_back(std::move(found->second));
++                m_overlays[handle]=std::move(image);found=m_overlays.find(handle);
++            }
++            auto& image=*found->second;D3DLOCKED_RECT lock{};
++            auto status=image.texture->LockRect(0,&lock,nullptr,D3DLOCK_DISCARD);if(FAILED(status))return status;
++            const bool copied=OverlayPixels::Copy(pixels,width,height,lock.pBits,lock.Pitch);
++            const auto unlocked=image.texture->UnlockRect(0);if(!copied||FAILED(unlocked))return D3DERR_INVALIDCALL;
++            D3D9_TEXTURE_VR_DESC desc{};status=GetVRDesc(image.surface,&desc);if(FAILED(status))return status;
++            static_assert(sizeof(desc)==sizeof(image.shared.m_VulkanData));
++            memcpy(&image.shared.m_VulkanData,&desc,sizeof(desc));
++            image.shared.m_VRTexture={&image.shared.m_VulkanData,vr::TextureType_Vulkan,vr::ColorSpace_Auto};
++            image.dirty=true;return D3D_OK;
++        }
++        HRESULT STDMETHODCALLTYPE SubmitOverlayTextures() {
++            auto* vr=g_Game?g_Game->m_VR:nullptr;
++            if(!m_queueLocked||!vr||!vr->m_Overlay)return D3DERR_INVALIDCALL;
++            for(auto& entry:m_overlays)if(entry.second->dirty) {
++                const auto result=vr->m_Overlay->SetOverlayTexture(entry.first,&entry.second->shared.m_VRTexture);
++                entry.second->dirty=false;vr->OverlayTextureSubmitted(entry.first,result);
++            }
++            return D3D_OK;
          }
  
      private:
++        struct OverlayImage {
++            IDirect3DTexture9* texture=nullptr;IDirect3DSurface9* surface=nullptr;
++            uint32_t width=0,height=0;bool dirty=false;SharedTextureHolder shared;
++            ~OverlayImage(){if(surface)surface->Release();if(texture)texture->Release();}
++        };
++        std::map<uint64_t,std::unique_ptr<OverlayImage>> m_overlays;
++        // Preserve a resized texture while the native compositor may still own
++        // its old image. This bounded list lives only for the app session.
++        std::vector<std::unique_ptr<OverlayImage>> m_retiredOverlays;
 +        std::vector<Rc<DxvkImage>> m_externalImages;
 +        bool m_queueLocked=false;
 +        int m_lastExternalCount=-1;
++        uint64_t m_bridgeChanges=0,m_nextBridgeLog=0;
 +        void AddExternalImage(IDirect3DSurface9* surface) {
 +            if(!surface)return;
 +            auto* texture=static_cast<D3D9Surface*>(surface)->GetCommonTexture();
@@ -426,7 +481,7 @@ index 8ed15b0..9b7f511 100644
          D3D9DeviceEx *m_device;
          D3D9DeviceLock m_lock;
      };
-@@ -156,4 +234,4 @@ HRESULT __stdcall Direct3DCreateVRImpl(IDirect3DDevice9 *pDevice, IDirect3DVR9 *
+@@ -156,4 +289,4 @@ HRESULT __stdcall Direct3DCreateVRImpl(IDirect3DDevice9 *pDevice, IDirect3DVR9 *
      *pInterface = new dxvk::D3D9VR(pDevice);
  
      return D3D_OK;
@@ -434,10 +489,10 @@ index 8ed15b0..9b7f511 100644
 \ No newline at end of file
 +}
 diff --git a/src/d3d9/d3d9_vr.h b/src/d3d9/d3d9_vr.h
-index b906cf7..150d81f 100644
+index b906cf7..bf5afcb 100644
 --- a/src/d3d9/d3d9_vr.h
 +++ b/src/d3d9/d3d9_vr.h
-@@ -33,6 +33,12 @@ IDirect3DVR9 : public IUnknown{
+@@ -33,6 +33,14 @@ IDirect3DVR9 : public IUnknown{
    virtual HRESULT STDMETHODCALLTYPE UnlockDevice() = 0;
    virtual HRESULT STDMETHODCALLTYPE WaitDeviceIdle() = 0;
    virtual HRESULT STDMETHODCALLTYPE GetBackBufferData(SharedTextureHolder *backBufferData) = 0;
@@ -447,10 +502,12 @@ index b906cf7..150d81f 100644
 +  virtual HRESULT STDMETHODCALLTYPE EndTextureSubmission() = 0;
 +  virtual HRESULT STDMETHODCALLTYPE LockVulkanQueue() = 0;
 +  virtual HRESULT STDMETHODCALLTYPE UnlockVulkanQueue() = 0;
++  virtual HRESULT STDMETHODCALLTYPE UploadOverlayPixels(uint64_t handle,const uint32_t* pixels,uint32_t width,uint32_t height) = 0;
++  virtual HRESULT STDMETHODCALLTYPE SubmitOverlayTextures() = 0;
  };
  
  #ifdef _MSC_VER
-@@ -42,4 +48,4 @@ __CRT_UUID_DECL(IDirect3DVR9, 0x7e272b32, 0xa49c, 0x46c7, 0xb1, 0xa4, 0xef, 0x52
+@@ -42,4 +50,4 @@ __CRT_UUID_DECL(IDirect3DVR9, 0x7e272b32, 0xa49c, 0x46c7, 0xb1, 0xa4, 0xef, 0x52
  #endif
  
  HRESULT __stdcall Direct3DCreateVRImpl(IDirect3DDevice9 *pDevice,

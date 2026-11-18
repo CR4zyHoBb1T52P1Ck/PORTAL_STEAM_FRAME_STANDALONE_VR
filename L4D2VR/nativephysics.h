@@ -5,6 +5,7 @@
 namespace NativePhysics {
 struct Binding {
     uintptr_t setTarget=0,detach=0,getAttached=0;const uintptr_t* entries=nullptr;
+    uintptr_t shutdownPickup=0,pickupTable=0;
     static Binding Resolve(uintptr_t server) {
         Binding out;
         auto match=[&](size_t at,const unsigned char* bytes,size_t size){return server&&SigScanner::IsReadable(server+at,size)&&!memcmp(reinterpret_cast<void*>(server+at),bytes,size);};
@@ -17,7 +18,20 @@ struct Binding {
             ||!match(0x45fed0,detach,sizeof(detach))||!match(0x463060,attached,sizeof(attached))||!match(0x463070,serial,sizeof(serial)))return out;
         uintptr_t global=0;memcpy(&global,reinterpret_cast<void*>(server+0x46306c),4);
         if(global!=server+0x66c9fc||!SigScanner::IsReadable(global,4))return out;
-        out={server+0x466300,server+0x45fed0,server+0x463060,reinterpret_cast<const uintptr_t*>(global)};return out;
+        out={server+0x466300,server+0x45fed0,server+0x463060,reinterpret_cast<const uintptr_t*>(global)};
+        const unsigned char shutdown[]={0x55,0x8b,0xec,0x83,0xec,0x10,0x53,0x56,0x57,0x8b,0xf9,0x8b,0x87,0x88,0x23,0,0};
+        const unsigned char detachCall[]={0x8d,0x8f,0x38,3,0,0,0xe8,0x35,0x99,0xff,0xff,0x8b,0x97,0xc8,0x23,0,0};
+        if(match(0x466520,shutdown,sizeof(shutdown))&&match(0x466590,detachCall,sizeof(detachCall))) {
+            out.pickupTable=SigScanner::FindRttiVtable("server.dll",".?AVCPlayerPickupController@@");
+            if(out.pickupTable)out.shutdownPickup=server+0x466520;
+        }
+        return out;
+    }
+    void* PickupOwner(void* controller,void* player) const {
+        if(!shutdownPickup||!pickupTable||!controller||!player)return nullptr;
+        const uintptr_t parent=reinterpret_cast<uintptr_t>(controller)-0x338;
+        if(!SigScanner::IsReadable(parent,4)||!SigScanner::IsReadable(parent+0x23c8,4))return nullptr;
+        return *reinterpret_cast<const uintptr_t*>(parent)==pickupTable&&*reinterpret_cast<void* const*>(parent+0x23c8)==player?reinterpret_cast<void*>(parent):nullptr;
     }
     void* Entity(unsigned handle) const {
         if(!entries||handle==0xffffffff)return nullptr;

@@ -18,6 +18,7 @@
 #include "autocalibration.h"
 #include "bodycalibration.h"
 #include "handcontact.h"
+#include "propholdinput.h"
 
 #define MAX_STR_LEN 256
 
@@ -104,8 +105,10 @@ public:
     int m_HolsteredShoulder=1;
     float HolsterRadius(int physical);
     unsigned m_MenuImageFailures=0;
-    bool m_MenuFileTransport=false;
+    bool m_MenuFileTransport=true;
     vr::EVROverlayError UploadMenuImageFromFile();
+    vr::EVROverlayError UploadOverlayFile(vr::VROverlayHandle_t handle,const std::vector<uint32_t>& pixels,int width,int height,const char* name);
+    void OverlayTextureSubmitted(vr::VROverlayHandle_t handle,vr::EVROverlayError result);
 	vr::VROverlayHandle_t m_GraphicsStagingHandle=0;
 	MenuRaster::Swap m_MenuRaster;
 	bool m_ActiveLegacyEffects=false,m_RestartRequested=false;
@@ -372,6 +375,12 @@ public:
 	QAngle m_ServerGrabAngles = { 0, 0, 0 };
 	void SnapshotGrabPose();
 	bool m_UseCommandHeld = false;
+    PropHold::Input m_PropHold;
+    bool m_PropInputSupported=false;
+    bool HandControlledProps() const{return m_PropInputSupported&&(m_Graphics.propGrabMode==1||m_Graphics.enhancedThrow);}
+    int PropHand() const{return HandControlledProps()&&m_PropHold.hand>=0?m_PropHold.hand:m_Weapon.hand;}
+    bool PropHandTracked() const{return PropHand()==0?m_LeftControllerPose.isValid:m_RightControllerPose.isValid;}
+    void UpdatePropInput();
 	std::chrono::steady_clock::time_point m_PrevFrameTime;
 
 	float m_TurnSpeed = 0.15f;

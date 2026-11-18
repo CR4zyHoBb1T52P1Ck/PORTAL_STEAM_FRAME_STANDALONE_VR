@@ -1,22 +1,23 @@
-# v0.1.0-beta.1 â€” Portal in your pocket
+# v0.1.0-beta.2 — Audit-21 stability update
 
-First public standalone Steam Frame beta, based on the tested Physics-16 DLL.
+Fixes the additional first-person body draw using a real model-instance cache
+slot. It now bypasses stale cached lighting, addressing the captured load/chamber
+transition crash path. Also includes corrected jump legs, loading-plaque guards,
+paired portal model matrices, reusable GPU menu textures, grip-held pickup and
+release-to-throw for either hand, and safer throw cancellation on tracking loss
+or portal crossing. Native portal movement and funneling routines are retained.
 
-- Full head/controller VR, native Chell hands/body and animated portal gun.
-- Corrected eye cameras and sharper scene rendering; visual/upscale controls.
-- Movable companion VR settings panel, lasers, haptics and both-stick shortcut.
-- Two-handed aiming, hand transfer, adjustable shoulder holsters and back model.
-- Portal avatar/weapon pose, finger curl, calibration, body and wrist controls.
-- Rigid fitted torso and optional surface contact, hand-held carry and throws.
-- Mod-only installer, owned-asset generation, backups and package checksums.
+The owner reports approximately 40 minutes of play with much better stability.
+The run ended in a sudden headset power-off; its cause (including battery,
+temperature or a system fault) is unconfirmed. This is still a beta; stability,
+all portal/carry combinations and performance vary by device and settings.
+Optional contact/hand-held carry/controller throws remain disabled by default.
 
-**Known issues:** a crash was reported during the latest test and is under
-investigation. Physics features were not all tested and ship disabled. Portal
-travel was observed, but funneling/momentum/carry combinations need further
-qualification. This beta makes no fixed FPS/90 Hz or universal runtime guarantee.
-Standalone setup currently needs an owned Windows Portal copy and a working
-Frame ARM64 Proton/FEX VR shortcut. Automatic restart needs helper integration;
-otherwise exit and relaunch manually. No remote logging service is installed.
+Validation: 63 host tests, retail ABI checks, portal/camera regression checks and
+AddressSanitizer body/leg checks pass. CPU checks do not establish GPU stability.
+Upgrade preserves existing configuration and creates backups. No game, driver,
+recordings, private logs or generated retail models are distributed. Generate
+owned assets with Install.py; keep your existing working Frame runtime setup.
 
-See README for installation, controls, limitations and credits. No retail game
-assets or private development data are included. This is not the final release.
+This release contains the tested Audit-21 DLL only. New crosshair, contact and
+customization requests are being developed separately.
