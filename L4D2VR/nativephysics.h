@@ -66,4 +66,26 @@ inline bool Velocity(void* object,const Vector& linear,const Vector& localAngula
     const auto target=Method(object,49);if(!target)return false;
     reinterpret_cast<void(__thiscall*)(void*,const Vector*,const Vector*)>(target)(object,&linear,&localAngular);return true;
 }
+inline bool ContactProfile() {
+    // Match the owned retail VPhysics build before using additional public
+    // IPhysicsObject methods. GetPosition47/SetVelocity49 are independently
+    // verified against this Portal server; Source SDK defines the same table.
+    const auto base=reinterpret_cast<uintptr_t>(GetModuleHandleA("vphysics.dll"));
+    if(!SigScanner::IsReadable(base,sizeof(IMAGE_DOS_HEADER)))return false;
+    const auto* dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if(dos->e_magic!=IMAGE_DOS_SIGNATURE||dos->e_lfanew<0||dos->e_lfanew>4096||!SigScanner::IsReadable(base+dos->e_lfanew,sizeof(IMAGE_NT_HEADERS)))return false;
+    const auto* nt=reinterpret_cast<const IMAGE_NT_HEADERS*>(base+dos->e_lfanew);
+    return nt->Signature==IMAGE_NT_SIGNATURE&&nt->FileHeader.TimeDateStamp==0x674532f1&&nt->OptionalHeader.SizeOfImage==0xeb000;
+}
+inline bool Push(void* object,const Vector& impulse,const Vector& position) {
+    if(!TwoHandAim::Finite(impulse)||!TwoHandAim::Finite(position)||impulse.LengthSqr()<.0001f)return false;
+    static const bool profile=ContactProfile();if(!profile)return false;
+    // Public IPhysicsObject: IsMoveable10, Wake24, ApplyForceOffset60. An offset
+    // impulse lets native mass/inertia determine tipping, rather than replacing
+    // velocities or moving an object/player directly.
+    const auto movable=Method(object,10),wake=Method(object,24),force=Method(object,60);
+    if(!movable||!wake||!force||!reinterpret_cast<bool(__thiscall*)(void*)>(movable)(object))return false;
+    reinterpret_cast<void(__thiscall*)(void*)>(wake)(object);
+    reinterpret_cast<void(__thiscall*)(void*,const Vector&,const Vector&)>(force)(object,impulse,position);return true;
+}
 }

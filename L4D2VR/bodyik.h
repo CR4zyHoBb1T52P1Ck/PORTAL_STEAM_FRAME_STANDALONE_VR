@@ -158,16 +158,16 @@ struct Rig {
         const auto delta=HandPose::Concat(target,HandPose::InverseRigid(bones[root]));
         for(int i=0;i<count;++i)if(below[root][i])bones[i]=HandPose::Concat(delta,bones[i]);
     }
-    void Curl(matrix3x4_t* bones,int h,const float* values,bool gripping,float gain=1) const {
+    void Curl(matrix3x4_t* bones,int h,const float* values,bool gripping,float gain=1,float gripFloor=.5f,float extension=0) const {
         if(!values)return;
         static const float grip[5]={.35f,.1f,.5f,.5f,.5f};
         for(int f=0;f<5;++f) {
             const float amount=FingerRange::Amount(values[f],gain);
-            const float curl=gripping?grip[f]+(1-grip[f])*amount:amount;
+            const float curl=gripping&&f!=0?std::max(amount,gripFloor*(f==1?.25f:1.f)):amount;
             int parent=arm[h][2];
             for(int s=0;s<3;++s) {
                 const int bone=fingers[h][f][s];
-                bones[bone]=HandPose::Concat(bones[parent],HandPose::RotateJoint(fingerLocal[h][f][s],fingerAxis[h][f][s],FingerRange::Angle(f,s,curl)));
+                bones[bone]=HandPose::Concat(bones[parent],HandPose::RotateJoint(fingerLocal[h][f][s],fingerAxis[h][f][s],FingerRange::Angle(f,s,curl,extension)));
                 parent=bone;
             }
         }
@@ -274,7 +274,19 @@ struct Rig {
         auto vertical=TwoHandAim::Position(bones[neck])-TwoHandAim::Position(bones[hips]);
         for(int i=0;i<count;++i)if(below[spine][i]&&!below[neck][i]&&!below[arm[0][0]][i]&&!below[arm[1][0]][i])Radial(bones[i],vertical,torso);
     }
-    bool SolveNative(matrix3x4_t* bones,const Vector& headTarget,const matrix3x4_t hands[2],Vector forward,float reach,float influence,bool autoReach,const float* curls[2],const bool gripping[2],const matrix3x4_t* headPose=nullptr,float fingerGain=1,float twistFraction=.5f,bool palmAnchor=false,float handScale=1,float wristScale=1,float palmDepth=1,bool preserveTorso=false) const {
+    void TorsoVolume(matrix3x4_t* bones,float chestAmount,float hipAmount) const {
+        if(!bones)return;
+        const auto vertical=TwoHandAim::Position(bones[neck])-TwoHandAim::Position(bones[hips]);
+        // Skin affine transforms only. Do not move neck, shoulder, wrist,
+        // pelvis or leg joints, including the palette reused in portal views.
+        Radial(bones[hips],vertical,std::clamp(hipAmount,.75f,2.3f));
+        for(int i=0;i<count;++i)if(below[spine][i]&&!below[neck][i]
+            &&!below[arm[0][0]][i]&&!below[arm[1][0]][i]) {
+            // Clavicles have no torso skin; leave their arm basis untouched.
+            if(i==chest||parents[i]==spine)Radial(bones[i],vertical,std::clamp(chestAmount,.75f,2.3f));
+        }
+    }
+    bool SolveNative(matrix3x4_t* bones,const Vector& headTarget,const matrix3x4_t hands[2],Vector forward,float reach,float influence,bool autoReach,const float* curls[2],const bool gripping[2],const matrix3x4_t* headPose=nullptr,float fingerGain=1,float twistFraction=.5f,bool palmAnchor=false,float handScale=1,float wristScale=1,float palmDepth=1,bool preserveTorso=false,const float* gripFloors=nullptr,float thumbExtension=0) const {
         if(!bones||count<1||!TwoHandAim::Finite(headTarget)||!std::isfinite(influence))return false;
         influence=std::clamp(influence,0.f,1.f);if(influence==0)return true;
         forward.z=0;if(!TwoHandAim::Unit(forward))forward={1,0,0};const auto right=CrossProduct(forward,{0,0,1});
@@ -300,7 +312,7 @@ struct Rig {
             for(int r=0;r<3;++r)wrist[r][3]=position[r];
             if(wristTwist[h]>=0)PoseTwist::Distribute(bones[wristTwist[h]],bones[arm[h][2]],wrist,position-TwoHandAim::Position(bones[arm[h][1]]),twistFraction);
             ReanchorBranch(bones,arm[h][2],wrist);
-            Curl(bones,h,curls?curls[h]:nullptr,gripping[h],fingerGain);
+            Curl(bones,h,curls?curls[h]:nullptr,gripping[h],fingerGain,gripFloors?gripFloors[h]:.5f,thumbExtension);
         }
         if(headPose&&eyeBone==head)ReanchorBranch(bones,head,HandPose::Concat(*headPose,HandPose::InverseRigid(eyeLocal)));
         return true;

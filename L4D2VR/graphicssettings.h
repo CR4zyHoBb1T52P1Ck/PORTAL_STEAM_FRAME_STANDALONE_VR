@@ -7,6 +7,17 @@
 namespace VrGraphics {
 constexpr int Width=1200,Height=1060,Top=194,RowHeight=58,Rows=12;
 struct Settings {
+    bool swapPortalColors=false,gunGripPose=true,handPush=false,gunPush=false,gunWallContact=false,jiggle=false;
+    int crosshair=0,crosshairColor=0,thumbPose=0;
+    bool crosshairDepth=true;
+    float crosshairMM=10,crosshairOpacity=90,crosshairDistance=3;
+    float thumbGain=100,thumbStraighten=0,thumbExtension=0,gunGripCurl=65,supportGripCurl=55;
+    float pushGain=1,pushMaxImpulse=20,pushRadiusCM=4,pushHz=30,gunContactRadiusCM=7;
+    float handImpactGain=6,gunImpactGain=6,impactMaxNS=160,impactCooldownMS=100;
+    float gunWallRadiusCM=4,gunWallLimitCM=90,gunWallRelease=100;
+    bool portalContactBypass=true,palmSnap=true,propShapePose=true;
+    float palmCarryCM=7,propPoseCurl=65,chestScale=100,hipScale=100;
+    float jiggleStrength=30,jiggleHz=4,jiggleDamping=.8f,jiggleChest=100,jiggleHips=50;
     int scale=100,msaa=2,texture=0,filter=8,upscaler=0;
     bool blur=false,bloom=true,shadows=true,mirror=false,showFps=false;
     bool legacyEffects=false;

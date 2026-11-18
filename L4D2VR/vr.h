@@ -19,6 +19,11 @@
 #include "bodycalibration.h"
 #include "handcontact.h"
 #include "propholdinput.h"
+#include "bodysecondary.h"
+#include "reticle.h"
+#include "worldpush.h"
+#include "guncontact.h"
+#include "triggercolors.h"
 
 #define MAX_STR_LEN 256
 
@@ -151,7 +156,7 @@ public:
 	void UpdateMenuChrome(int width,int height);
 	void UpdateFpsOverlay();
 	matrix3x4_t GetHandFrame(bool left);
-	matrix3x4_t GetGunControllerFrame();
+	matrix3x4_t GetGunControllerFrame(bool contact=true);
 	matrix3x4_t GetRawGunControllerFrame();
 	float HeightOffset() const {return (m_Graphics.height+(m_Graphics.seated?m_Graphics.seatBoost:0))*m_VRScale/100;}
 	void OpenGraphicsMenu(bool focusMod=true);
@@ -269,6 +274,19 @@ public:
 	bool m_RenderedHud = false;
 	bool m_CreatedVRTextures = false;
 	bool m_DrawCrosshair = false;
+    vr::VROverlayHandle_t m_ReticleHandle=0;
+    int m_ReticleKey=-1;bool m_ReticleReady=false,m_ReticlePending=false;
+    uint64_t m_ReticleRetry=0;
+    BodySecondary::Spring m_SecondaryMotion;
+    void UpdateCrosshair();
+    matrix3x4_t m_ContactRelative[5]{};bool m_ContactValid[5]{};
+    uint64_t m_ContactSnapshot=0,m_ContactResetUntil=0;
+    float m_GunWallRetraction=0;bool m_GunWallTouch=false;
+    Vector m_GunWallDirection{1,0,0};
+    Vector m_GunWallOffset{0,0,0};
+    bool PortalContactClearance();
+    void SnapshotContactPoints();
+    void UpdateGunWallContact();
 	TextureID m_CreatingTextureID = Texture_None;
 	TextureID m_BindingEyeTexture = Texture_None;
 
@@ -377,7 +395,9 @@ public:
 	bool m_UseCommandHeld = false;
     PropHold::Input m_PropHold;
     bool m_PropInputSupported=false;
-    bool HandControlledProps() const{return m_PropInputSupported&&(m_Graphics.propGrabMode==1||m_Graphics.enhancedThrow);}
+    // Either physical controller selects props, independently of carry style.
+    bool HandControlledProps() const{return m_PropInputSupported;}
+    bool PropBlocksGun() const{return m_PropHold.attached&&PropHand()==WeaponHand();}
     int PropHand() const{return HandControlledProps()&&m_PropHold.hand>=0?m_PropHold.hand:m_Weapon.hand;}
     bool PropHandTracked() const{return PropHand()==0?m_LeftControllerPose.isValid:m_RightControllerPose.isValid;}
     void UpdatePropInput();

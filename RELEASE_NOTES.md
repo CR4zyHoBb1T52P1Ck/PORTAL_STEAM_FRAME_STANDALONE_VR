@@ -1,23 +1,43 @@
-# v0.1.0-beta.2 — Audit-21 stability update
+# v0.1.0-beta.3 - Embodiment-23
 
-Fixes the additional first-person body draw using a real model-instance cache
-slot. It now bypasses stale cached lighting, addressing the captured load/chamber
-transition crash path. Also includes corrected jump legs, loading-plaque guards,
-paired portal model matrices, reusable GPU menu textures, grip-held pickup and
-release-to-throw for either hand, and safer throw cancellation on tracking loss
-or portal crossing. Native portal movement and funneling routines are retained.
+The owner-tested contact, gun and customization update. Uses the exact tested
+Embodiment-23 DLL, retaining the Audit-21 lighting/crash-path fix.
 
-The owner reports approximately 40 minutes of play with much better stability.
-The run ended in a sudden headset power-off; its cause (including battery,
-temperature or a system fault) is unconfirmed. This is still a beta; stability,
-all portal/carry combinations and performance vary by device and settings.
-Optional contact/hand-held carry/controller throws remain disabled by default.
+- Stronger, independently adjustable hand/gun impacts, impulse caps and cooldown.
+  Embedded contacts recover a surface query; stationary force traces are skipped.
+- Gun wall correction follows a protected head-to-muzzle sweep, with adjustable
+  radius, displacement limit and release response. Portal-environment bypass and
+  crossing/loading/menu resets protect native movement and funneling behavior.
+- Complete rigid rear gun housing generated from owned retail assets, with an
+  inner lining; native hands, glass, moving claws and animations are preserved.
+- Either controller selects native props, independently of float/palm carry.
+  Optional palm snap, offset and approximate finger curl. One native held object
+  remains supported; independent dual-object carry is not implemented.
+- Fixed physical trigger portal colors across handoffs, saved thumb extension,
+  crosshair options, body calibration and cosmetic body customization controls.
+- Existing reusable GPU menus and scene rendering retained; redundant paired-hand
+  draws are skipped when the current full-body palette provides those hands.
 
-Validation: 63 host tests, retail ABI checks, portal/camera regression checks and
-AddressSanitizer body/leg checks pass. CPU checks do not establish GPU stability.
-Upgrade preserves existing configuration and creates backups. No game, driver,
-recordings, private logs or generated retail models are distributed. Generate
-owned assets with Install.py; keep your existing working Frame runtime setup.
+Owner feedback: impacts and wall contact are substantially improved, the gun
+looks good, and ordinary scenes run near71FPS in this setup. Looking at a portal
+or multiple portals still causes slowdown. These are owner observations, not a
+sustained performance guarantee or a GPU benchmark.
 
-This release contains the tested Audit-21 DLL only. New crosshair, contact and
-customization requests are being developed separately.
+Known issues: the owner did not find chest/hip sliders in the headset menu and
+wants more pronounced jiggle. Those controls exist in this build's Body shape
+page but visibility/discoverability and response remain under investigation.
+Hand-driven body response is NOT included. Portal-heavy optimization and those
+body improvements are next-build work, not claimed fixed in this release.
+Historical abrupt headset power-off cause remains unconfirmed.
+
+Validation:76 host tests, owned native ABI and portal/camera checks, AddressSanitizer
+body/leg/contact/palm/portal-skin checks and overlay pixel/queue regressions pass.
+CPU checks do not establish headset/GPU stability. Save progress regularly.
+Experimental hand contact, pushes, palm carry, throws and jiggle default off;
+enable the features you want in World interactions / Arms / Jiggle.
+
+Install.py verifies the mod package, generates gun/hands from your owned Windows
+Portal assets, preserves existing settings and creates rollback backups. Keep
+your working Frame runtime/shortcut setup. No game assets, drivers, recordings,
+private logs or generated retail models are distributed. Existing credits and
+license are preserved. No automatic gameplay test deadline or termination.

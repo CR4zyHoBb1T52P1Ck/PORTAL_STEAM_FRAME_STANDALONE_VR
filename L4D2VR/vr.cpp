@@ -715,16 +715,21 @@ bool VR::PressedDigitalAction(vr::VRActionHandle_t &actionHandle, bool checkIfAc
 {
     if(!m_SystemFocus.Allowed() || GetTickCount64()<m_HandSwitchSuppressUntil) return false;
     const bool fire=actionHandle==m_ActionPrimaryAttack||actionHandle==m_ActionSecondaryAttack;
-    if(fire&&(m_Weapon.stowed||m_Weapon.fireBlocked||m_PropHold.attached))return false;
+    if(fire&&(m_Weapon.stowed||m_Weapon.fireBlocked||PropBlocksGun()||!WeaponTracked()))return false;
     if(actionHandle==m_ActionUse) {
         if(HandControlledProps())return m_PropHold.use&&!m_PropHold.release;
         if(m_WeaponConsumesGrip||m_Weapon.blocked[m_Weapon.hand]||m_UseGripBlocked[m_Weapon.hand])return false;
         if(m_Weapon.hand==0)return m_GripPressed[0]&&!m_Weapon.blocked[0];
     }
     auto action=actionHandle;
-    if(fire&&m_Weapon.hand==0)action=actionHandle==m_ActionPrimaryAttack?m_ActionSecondaryAttack:m_ActionPrimaryAttack;
+    const int physical=TriggerColors::Physical(actionHandle==m_ActionPrimaryAttack,m_Graphics.swapPortalColors);
+    if(fire)action=m_MenuTriggers[physical];
     vr::InputDigitalActionData_t digitalActionData{};
-    vr::EVRInputError result = m_Input->GetDigitalActionData(ResolveAction(action), &digitalActionData, sizeof(digitalActionData), vr::k_ulInvalidInputValueHandle);
+    vr::EVRInputError result = m_Input->GetDigitalActionData(fire?action:ResolveAction(action), &digitalActionData, sizeof(digitalActionData), vr::k_ulInvalidInputValueHandle);
+    if(fire&&(result!=vr::VRInputError_None||!digitalActionData.bActive)) {
+        const auto fallback=TriggerColors::LegacyPrimary(physical,m_LeftHanded&&m_LeftActionSet)?m_ActionPrimaryAttack:m_ActionSecondaryAttack;
+        result=m_Input->GetDigitalActionData(ResolveAction(fallback),&digitalActionData,sizeof(digitalActionData),vr::k_ulInvalidInputValueHandle);
+    }
     
     if (result == vr::VRInputError_None && digitalActionData.bActive)
     {
@@ -880,6 +885,7 @@ void VR::UpdateWeaponHandling() {
         } else WeaponHaptic(m_Weapon.hand,1,m_Graphics.holsterHaptics);
     }
     if(event!=WeaponHandling::None) {
+        m_ContactResetUntil=GetTickCount64()+250;m_GunWallRetraction=0;
         m_ThrowReleaseUntil=0;
         m_Game->ClientCmd_Unrestricted("-attack;-attack2;-use");m_UseCommandHeld=false;m_GrabPoseValid=m_PickupAimValid=false;
         PortalVrLog("Weapon interaction event=%d hand=%d stowed=%d",int(event),m_Weapon.hand,m_Weapon.stowed);
@@ -1401,10 +1407,15 @@ void VR::AvatarFingerCurls(bool physicalLeft,float* out) {
     const bool flat=m_Graphics.handContact&&m_Graphics.contactPose&&state.valid&&state.touching
         &&GetTickCount64()-state.time<150&&InteractionAllowed()
         &&!HandContact::Override(source,m_Graphics.fingerRange/100,m_Graphics.contactOverride/100);
-    for(int f=0;f<5;++f)out[f]=flat?0:source[f];
+    for(int f=0;f<5;++f)out[f]=flat||!m_Graphics.fingerTracking?0:source[f];
+    if(m_Graphics.propShapePose&&m_PropHold.attached&&logicalLeft==(PropHand()==0)) {
+        // Curl approximation keeps tracked fingers free to curl farther.
+        for(int f=1;f<5;++f)out[f]=std::max(out[f],m_Graphics.propPoseCurl/100*(f==1?.8f:1.f));
+    }
+    out[0]=m_Graphics.thumbPose?0:std::clamp(out[0]*m_Graphics.thumbGain/100-m_Graphics.thumbStraighten/100,0.f,1.f);
 }
 void VR::UpdateHandContacts() {
-    if(!m_Graphics.handContact||!InteractionAllowed()){m_HandContact[0]=m_HandContact[1]={};return;}
+    if(!m_Graphics.handContact||!InteractionAllowed()||PortalContactClearance()){m_HandContact[0]=m_HandContact[1]={};return;}
     auto* player=m_Game->GetClientEntity(m_Game->GetLocalPlayerIndex());
     if(!player)return;
     const auto now=GetTickCount64();const float unit=m_VRScale/100;
@@ -1589,9 +1600,12 @@ void VR::UpdateTracking()
     m_ViewmodelRight = VectorRotate(m_ViewmodelRight, m_ViewmodelForward, m_ViewmodelAngOffset.z);
     m_ViewmodelUp = VectorRotate(m_ViewmodelUp, m_ViewmodelForward, m_ViewmodelAngOffset.z);
 
+    UpdateGunWallContact();
+    SnapshotContactPoints();
     UpdateHandContacts();
     // Trace only after this frame's controller positions and orientations are ready.
     m_AimPos = Trace((uint32_t*)localPlayer);
+    UpdateCrosshair();
 
     if (m_Game->m_Hooks->CreatePingPointer &&
         m_Game->m_Offsets->SetControlPoint.address && m_Game->m_Offsets->StopEmission.address) {

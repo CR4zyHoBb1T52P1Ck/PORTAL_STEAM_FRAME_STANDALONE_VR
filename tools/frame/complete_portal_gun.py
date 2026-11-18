@@ -21,6 +21,49 @@ def transform(p,normal=False):
     out=tuple(p[abs(m)-1]*(1 if m>0 else -1) for m in FIT['mapping'])
     return out if normal else tuple(out[c]*FIT['scale']+FIT['offset'][c] for c in range(3))
 
+def triangle_distance_squared(p,tri):
+    a,b,c=tri
+    sub=lambda x,y:tuple(x[i]-y[i] for i in range(3))
+    dot=lambda x,y:sum(x[i]*y[i] for i in range(3))
+    ab,ac,ap=sub(b,a),sub(c,a),sub(p,a)
+    d00,d01,d11=dot(ab,ab),dot(ab,ac),dot(ac,ac);den=d00*d11-d01*d01
+    if den>1e-12:
+        u=(d11*dot(ap,ab)-d01*dot(ap,ac))/den;v=(d00*dot(ap,ac)-d01*dot(ap,ab))/den
+        if u>=0 and v>=0 and u+v<=1:return sum((ap[i]-u*ab[i]-v*ac[i])**2 for i in range(3))
+    best=float('inf')
+    for x,y in ((a,b),(b,c),(c,a)):
+        edge,delta=sub(y,x),sub(p,x);length=dot(edge,edge);t=max(0,min(1,dot(delta,edge)/length)) if length else 0
+        best=min(best,sum((delta[i]-edge[i]*t)**2 for i in range(3)))
+    return best
+
+def mask_overlapping_shell(mdl,vvd,vtx,replacement):
+    """Remove rigid rear view-only faces; replace the whole region consistently.
+
+    Native glass, hands, front mechanism and every animated gun part survive.
+    Mixing only close triangles left intersecting one-way shell edges. The
+    complete owned world-model rear now supplies the entire curved housing.
+    """
+    vertices=vvd_vertices(vvd);bind=inverse_bind(mdl,24);model=mdl_model(mdl);lod=vtx_lod(vtx);masked=0
+    for mesh in range(integer(mdl,model+72)):
+        mh=model+integer(mdl,model+76)+mesh*116
+        if integer(mdl,mh)!=1:continue
+        offset=integer(mdl,mh+12);vm=lod+integer(vtx,lod+4)+mesh*9
+        for group in range(integer(vtx,vm)):
+            sg=vm+integer(vtx,vm+4)+group*25
+            num,vo,ni,io,ns,so=unpack(vtx,'<6i',sg)
+            for strip in range(ns):
+                sh=sg+so+strip*27;n,index=unpack(vtx,'<2i',sh)
+                if not vtx[sh+18]&1:continue
+                for j in range(0,n,3):
+                    at=sg+io+(index+j)*2;ids=unpack(vtx,'<3H',at)
+                    original=[offset+unpack(vtx,'<H',sg+vo+i*9+4)[0] for i in ids]
+                    if not all(vertices[i]['record'][12:16]==bytes([24,0,0,1]) for i in original):continue
+                    pts=[point(bind,vertices[i]['position']) for i in original]
+                    if max(q[2] for q in pts)<17.8:
+                        struct.pack_into('<3H',vtx,at,ids[0],ids[0],ids[0]);masked+=1
+    assert 100<masked<2500
+    return masked
+
 def complete(view,world):
     assert tuple(hashlib.sha256(x).hexdigest() for x in (*view,*world))==RETAIL_SHA256,'Unsupported retail gun assets; preserve them unchanged'
     mdl,vvd,vtx=map(bytearray,view);wm,wv,wt=world
@@ -29,7 +72,7 @@ def complete(view,world):
     assert integer(wm,156)==1 and integer(wm,4)==44
     assert integer(mdl,8)==integer(vvd,8)==integer(vtx,16)
     old=list(vvd_vertices(vvd));wvlist=vvd_vertices(wv)
-    original_triangles=list(triangles(mdl,vtx))
+    retail_triangle_count=len(list(triangles(mdl,vtx)))
     # World housing uses native UVs/material. Exclude moving claws/front barrel;
     # retain lower rear faces that the first-person mesh leaves open.
     selected=[];outer_count=0;liner_count=0;world_count=len(wvlist)
@@ -38,13 +81,26 @@ def complete(view,world):
         positions=[transform(wvlist[i]['position']) for i in tri]
         normals=[transform(wvlist[i]['normal'],True) for i in tri]
         center=tuple(sum(p[c] for p in positions)/3 for c in range(3))
-        if center[1]<1.5 and center[2]<18 and sum(n[1] for n in normals)/3<.25:
+        if center[2]<18:
             selected.append(tri);outer_count+=1
-        elif center[2]<18:
-            # Slightly inset rear lining fills missing first-person shell faces.
-            selected.append(tuple(i+world_count for i in tri));liner_count+=1
+            # Back faces of a closed curved shell must remain opaque from
+            # extreme VR viewing angles too. Inset reversed triangles form
+            # an inner lining without coplanar z-fighting.
+            selected.append(tuple(i+world_count for i in reversed(tri)));liner_count+=1
     ids=sorted({i for tri in selected for i in tri});remap={n:i for i,n in enumerate(ids)}
     assert 100<len(selected)<2500 and len(ids)<65536
+    replacement=[]
+    for tri in selected:
+        face=[]
+        for i in tri:
+            p=transform(wvlist[i%world_count]['position'])
+            if i>=world_count:
+                normal=transform(wvlist[i%world_count]['normal'],True);p=tuple(p[c]-.12*normal[c] for c in range(3))
+            face.append(p)
+        replacement.append(face)
+    masked=mask_overlapping_shell(mdl,vvd,vtx,replacement)
+    original_triangles=list(triangles(mdl,vtx))
+    assert len(original_triangles)==retail_triangle_count-masked
     base_to_model=rigid_inverse(inverse_bind(mdl,24))
     def rotate(p):return tuple(sum(base_to_model[r][c]*p[c] for c in range(3)) for r in range(3))
     added=[];tangents=[]
@@ -105,7 +161,7 @@ def complete(view,world):
     parsed=vvd_vertices(newvvd);assert len(parsed)==nv
     for i in range(n):assert parsed[i]['record']==old[i]['record'] and parsed[i]['tangent']==old[i]['tangent']
     for offset in (156,160,180,184,188,192,240,244):assert integer(mdl,offset)==integer(view[0],offset)
-    return tuple(map(bytes,(mdl,newvvd,vtx))),dict(original_vertices=n,added_vertices=count,original_triangles=len(original_triangles),added_triangles=len(selected),outer_triangles=outer_count,liner_triangles=liner_count,liner_inset=.12,bones=45,animation_and_attachment_offsets_preserved=True,fit=FIT)
+    return tuple(map(bytes,(mdl,newvvd,vtx))),dict(original_vertices=n,added_vertices=count,original_triangles=len(original_triangles),masked_legacy_shell_triangles=masked,retail_triangles=retail_triangle_count,added_triangles=len(selected),outer_triangles=outer_count,liner_triangles=liner_count,liner_inset=.12,rigid_rear_replacement=True,bones=45,animation_and_attachment_offsets_preserved=True,fit=FIT)
 
 def main():
     import argparse

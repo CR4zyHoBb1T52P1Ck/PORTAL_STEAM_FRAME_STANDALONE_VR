@@ -7,7 +7,7 @@ struct Row {std::string label,value;Action action=None;int target=-1;};
 inline std::vector<Row> Rows(const Settings& s,Page page) {
     std::vector<Row> rows;
     if(page==Home) {
-        for(const auto& item:std::vector<std::pair<const char*,Page>>{{"Calibration, tuning and comfort",Calibration},{"Arms and body",Arms},{"World interactions (beta)",Interactions},{"Gun placement and holster",Gun},{"Movement",Movement},{"Turning",Turning},{"Comfort",Comfort},{"Visuals",Visuals},{"Upscaling",Upscaling},{"Menu placement and feedback",Menu},{"Screen effects",Effects}})
+        for(const auto& item:std::vector<std::pair<const char*,Page>>{{"Calibration, tuning and comfort",Calibration},{"Arms and body",Arms},{"World interactions (beta)",Interactions},{"Gun placement and holster",Gun},{"Movement, turning and comfort",LocomotionFit},{"Crosshair and trigger colors",Crosshair},{"Cosmetic jiggle",Jiggle},{"Visuals",Visuals},{"Upscaling",Upscaling},{"Menu placement and feedback",Menu},{"Screen effects",Effects}})
             rows.push_back({item.first,"Open  >",OpenPage,item.second});
         rows.push_back({"Resume game","Close all menus",Resume});
     } else {
@@ -22,7 +22,8 @@ inline std::vector<Row> Rows(const Settings& s,Page page) {
             rows.push_back({"Cancel capture / discard result","Keep saved fit",CancelTPose});
             rows.push_back({"Reset body calibration","Use native body",ResetBodyFit});
         }
-        if(page==Interactions)for(auto p:{WorldHands,PropGrab,Throwing})rows.push_back({Title(p),"Open  >",OpenPage,p});
+        if(page==Interactions)for(auto p:{WorldHands,PropGrab,Throwing,PhysicalContact})rows.push_back({Title(p),"Open  >",OpenPage,p});
+        if(page==Arms)rows.push_back({"Finger, thumb and gun poses","Open  >",OpenPage,Fingers});
         if(page==LocomotionFit)for(auto p:{Movement,Turning,Comfort})rows.push_back({Title(p),"Open  >",OpenPage,p});
         for(int i:On(page)) {const auto& o=Options()[i];rows.push_back({o.name,Value(s,o),Edit,i});}
         if(page==Arms)rows.push_back({"Native body and IK","Open  >",OpenPage,Body});
@@ -41,6 +42,8 @@ inline std::vector<Row> Rows(const Settings& s,Page page) {
         if(page==Feedback){rows.push_back({"Test left controller haptic","Pulse",TestHaptic,0});rows.push_back({"Test right controller haptic","Pulse",TestHaptic,1});}
         if(page==Gun){rows.push_back({"Portal gun grab point","Open  >",OpenPage,GrabPoint});rows.push_back({"Support grip and aiming","Open  >",OpenPage,Support});rows.push_back({"Shoulder holster","Open  >",OpenPage,Holster});}
         if(page==Support){rows.push_back({"Grip zone size and position","Open  >",OpenPage,GripZonePage});rows.push_back({"Supporting hand placement","Open  >",OpenPage,SupportHand});rows.push_back({"Weapon haptics","Open  >",OpenPage,Feedback});}
+        if(page==PhysicalContact){rows.push_back({"Hand / gun force controls","Open  >",OpenPage,ImpactTuning});rows.push_back({"Gun wall clearance controls","Open  >",OpenPage,GunCollision});}
+        if(page==PropGrab)rows.push_back({"Palm carry and object hand pose","Open  >",OpenPage,PropPose});
         if(page==Upscaling){
             rows.push_back({"Native clarity preset","2016 / 4x / native",Preset,0});
             rows.push_back({"Balanced upscale preset","1728 / 2x / 2016 edge",Preset,1});

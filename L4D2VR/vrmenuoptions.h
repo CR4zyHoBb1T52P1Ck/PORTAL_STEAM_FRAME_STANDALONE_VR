@@ -7,9 +7,12 @@
 #include <iomanip>
 namespace VrMenu {
 using Settings=VrGraphics::Settings;
-enum Page {Home,Arms,LeftArm,RightArm,Gun,Movement,Turning,Comfort,Visuals,Upscaling,Menu,Effects,Support,GripZonePage,SupportHand,Holster,Feedback,Body,GrabPoint,BodyTuning,Calibration,TPose,Measurements,HandFit,BodyShape,HolsterZones,LeftHolster,RightHolster,LocomotionFit,BackGun,Interactions,WorldHands,PropGrab,Throwing,PageCount};
+enum Page {Home,Arms,LeftArm,RightArm,Gun,Movement,Turning,Comfort,Visuals,Upscaling,Menu,Effects,Support,GripZonePage,SupportHand,Holster,Feedback,Body,GrabPoint,BodyTuning,Calibration,TPose,Measurements,HandFit,BodyShape,HolsterZones,LeftHolster,RightHolster,LocomotionFit,BackGun,Interactions,WorldHands,PropGrab,Throwing,Crosshair,Fingers,Jiggle,PhysicalContact,ImpactTuning,GunCollision,PropPose,PageCount};
 inline const char* Title(Page p) {
     static const char* titles[]={"VR SETTINGS","ARMS AND BODY","LEFT ARM POSITION","RIGHT ARM POSITION","PORTAL GUN","MOVEMENT","TURNING","COMFORT","VISUALS","UPSCALING","MENU AND FEEDBACK","SCREEN EFFECTS","SUPPORT GRIP","GRIP ZONE","SUPPORT HAND","SHOULDER HOLSTER","WEAPON HAPTICS","BODY IK","GUN GRAB POINT","BODY TUNING","CALIBRATION AND FIT","STANDING T-POSE","BODY MEASUREMENTS","HAND ALIGNMENT","BODY SHAPE","HOLSTER ZONES","LEFT HOLSTER","RIGHT HOLSTER","MOVEMENT AND COMFORT","HOLSTERED GUN","WORLD INTERACTIONS","HAND CONTACT","PROP GRAB","THROWING"};
+    if(p==Crosshair)return "CROSSHAIR AND COLORS";if(p==Fingers)return "FINGERS AND GUN POSES";
+    if(p==ImpactTuning)return "HAND AND GUN FORCE";if(p==GunCollision)return "GUN COLLISION AND CLEARANCE";if(p==PropPose)return "PALM CARRY AND POSE";
+    if(p==Jiggle)return "COSMETIC JIGGLE";if(p==PhysicalContact)return "PHYSICAL CONTACT (BETA)";
     return titles[int(p)];
 }
 inline Page Parent(Page p) {
@@ -22,6 +25,8 @@ inline Page Parent(Page p) {
     if(p==LeftHolster||p==RightHolster)return HolsterZones;
     if(p==BackGun)return Holster;
     if(p==WorldHands||p==PropGrab||p==Throwing)return Interactions;
+    if(p==ImpactTuning||p==GunCollision)return PhysicalContact;if(p==PropPose)return PropGrab;
+    if(p==PhysicalContact)return Interactions;if(p==Fingers)return Arms;
     return Home;
 }
 using Member=std::variant<int Settings::*,float Settings::*,bool Settings::*>;
@@ -32,6 +37,47 @@ struct Option {
 };
 inline const std::vector<Option>& Options() {
     static const std::vector<Option> all={
+        {"PortalTriggerColorsSwapped","Physical triggers: right / left",Crosshair,&Settings::swapPortalColors,0,1,1,"",{{0,"Blue / orange"},{1,"Orange / blue"}}},
+        {"VRCrosshair","World-space crosshair",Crosshair,&Settings::crosshair,0,3,1,"",{{0,"Off"},{1,"Dot"},{2,"Cross"},{3,"Ring"}}},
+        {"VRCrosshairColor","Crosshair color",Crosshair,&Settings::crosshairColor,0,4,1,"",{{0,"White"},{1,"Cyan"},{2,"Orange"},{3,"Green"},{4,"Magenta"}}},
+        {"VRCrosshairSizeMM","Crosshair size",Crosshair,&Settings::crosshairMM,2,40,2," mm"},
+        {"VRCrosshairOpacity","Crosshair opacity",Crosshair,&Settings::crosshairOpacity,10,100,5,"%"},
+        {"VRCrosshairSurfaceDepth","Follow aim surface depth",Crosshair,&Settings::crosshairDepth},
+        {"VRCrosshairDistance","Fallback / fixed distance",Crosshair,&Settings::crosshairDistance,.5f,15,.5f," m"},
+        {"ThumbPoseMode","Thumb pose",Fingers,&Settings::thumbPose,0,1,1,"",{{0,"Tracked"},{1,"Thumbs up"}}},
+        {"ThumbCurlGain","Thumb curl range",Fingers,&Settings::thumbGain,25,200,5,"%"},
+        {"ThumbStraighten","Thumb tracking straighten",Fingers,&Settings::thumbStraighten,0,80,5,"%"},
+        {"ThumbExtension","Extra thumb extension",Fingers,&Settings::thumbExtension,0,100,5,"%"},
+        {"GunSurfaceHandPose","Pose fingers around gun",Fingers,&Settings::gunGripPose},
+        {"GunHoldingCurl","Holding-hand grip curl",Fingers,&Settings::gunGripCurl,0,100,5,"%"},
+        {"GunSupportingCurl","Supporting-hand grip curl",Fingers,&Settings::supportGripCurl,0,100,5,"%"},
+        {"VisualBodyJiggle","Cosmetic jiggle (no world forces)",Jiggle,&Settings::jiggle},
+        {"JiggleStrength","Motion strength",Jiggle,&Settings::jiggleStrength,0,400,10,"%"},
+        {"JiggleFrequency","Spring frequency",Jiggle,&Settings::jiggleHz,2,10,.5f," Hz"},
+        {"JiggleDamping","Spring damping",Jiggle,&Settings::jiggleDamping,.2f,2,.1f},
+        {"JiggleChest","Chest influence",Jiggle,&Settings::jiggleChest,0,100,5,"%"},
+        {"JiggleHips","Hip influence",Jiggle,&Settings::jiggleHips,0,100,5,"%"},
+        {"HandImpactGain","Hand impact multiplier",ImpactTuning,&Settings::handImpactGain,1,30,1,"x"},
+        {"GunImpactGain","Gun impact multiplier",ImpactTuning,&Settings::gunImpactGain,1,30,1,"x"},
+        {"ImpactMaxNS","Impact impulse safety cap",ImpactTuning,&Settings::impactMaxNS,10,600,10," Ns"},
+        {"ImpactCooldownMS","Same-object impact cooldown",ImpactTuning,&Settings::impactCooldownMS,60,400,20," ms"},
+        {"GunWallRadiusCM","Gun wall hull radius",GunCollision,&Settings::gunWallRadiusCM,1,8,.5f," cm"},
+        {"GunWallLimitCM","Maximum visual displacement",GunCollision,&Settings::gunWallLimitCM,25,120,5," cm"},
+        {"GunWallRelease","Collision release response",GunCollision,&Settings::gunWallRelease,10,100,5,"%"},
+        {"PortalContactBypass","Clear contact in portal environment",GunCollision,&Settings::portalContactBypass},
+        {"PalmSnapCarry","Snap hand-held prop toward palm",PropPose,&Settings::palmSnap},
+        {"PalmCarryOffsetCM","Palm to object center",PropPose,&Settings::palmCarryCM,0,25,1," cm"},
+        {"PropShapeHandPose","Approximate held-object hand pose",PropPose,&Settings::propShapePose},
+        {"PropPoseCurl","Held-object finger curl",PropPose,&Settings::propPoseCurl,0,100,5,"%"},
+        {"ChestScalePercent","Chest width / depth",BodyShape,&Settings::chestScale,75,200,5,"%"},
+        {"HipScalePercent","Hip width / depth",BodyShape,&Settings::hipScale,75,200,5,"%"},
+        {"PhysicalHandPush","Hands push movable objects",PhysicalContact,&Settings::handPush},
+        {"PhysicalGunPush","Gun pushes movable objects",PhysicalContact,&Settings::gunPush},
+        {"GunWallContact","Gun wall contact / haptics",PhysicalContact,&Settings::gunWallContact},
+        {"ContactPushStrength","Overall impulse multiplier",ImpactTuning,&Settings::pushGain,.1f,3,.1f,"x"},
+        {"PhysicalHandRadiusCM","Hand contact radius",PhysicalContact,&Settings::pushRadiusCM,2,8,1," cm"},
+        {"PhysicalGunRadiusCM","Gun contact radius",PhysicalContact,&Settings::gunContactRadiusCM,3,12,1," cm"},
+        {"PhysicalContactHz","Contact query budget",PhysicalContact,&Settings::pushHz,15,60,5," Hz"},
         {"RigidFittedTorso","Rigid fitted torso",BodyTuning,&Settings::rigidTorso},
         {"TorsoHeightPercent","Fixed torso length",BodyTuning,&Settings::torsoHeight,80,120,2,"%"},
         {"BodyCameraClearanceCM","Torso camera clearance",BodyTuning,&Settings::bodyClearanceCM,0,15,.5f," cm"},
@@ -41,7 +87,7 @@ inline const std::vector<Option>& Options() {
         {"WorldHandRadiusCM","Palm collision radius",WorldHands,&Settings::contactRadiusCM,1,7,.5f," cm"},
         {"WorldHandContactHz","Contact update budget",WorldHands,&Settings::contactHz,20,90,5," Hz"},
         {"WorldHandPoseOverride","Squeeze overrides flat palm",WorldHands,&Settings::contactOverride,20,100,5,"%"},
-        {"PropGrabMode","Carry method",PropGrab,&Settings::propGrabMode,0,1,1,"",{{0,"Native float grab"},{1,"Hand-held physics (beta)"}}},
+        {"PropGrabMode","Carry method",PropGrab,&Settings::propGrabMode,0,1,1,"",{{0,"Native float grab"},{1,"Palm-held native physics"}}},
         {"HandGrabReachCM","Hand grab reach",PropGrab,&Settings::handGrabReachCM,10,100,5," cm"},
         {"ControllerThrows","Controller release velocity",Throwing,&Settings::enhancedThrow},
         {"ControllerThrowGain","Throw speed multiplier",Throwing,&Settings::throwGain,.25f,2,.05f,"x"},
@@ -172,7 +218,7 @@ inline const std::vector<Option>& Options() {
         {"AutoCalibration","Automatic body alignment",Comfort,&Settings::autoCalibration},
         {"ComfortVignette","Movement vignette",Comfort,&Settings::vignette},
         {"VignetteStrength","Vignette strength",Comfort,&Settings::vignetteStrength,.1f,1,.1f},
-        {"AimMode","Aim guide",Comfort,&Settings::aim,0,2,2,"",{{0,"Off"},{2,"Laser"}}},
+        {"AimMode","Native aim guide",Crosshair,&Settings::aim,0,2,1,"",{{0,"Off"},{1,"Native HUD"},{2,"Laser"}}},
         {"EyeRenderWidth","Eye image width",Visuals,&Settings::eyeWidth,1024,3200,128," px",{{1024,"1024 px"},{1280,"1280 px"},{1536,"1536 px"},{1728,"1728 px"},{2016,"2016 px"},{2304,"2304 px"},{2560,"2560 px"},{2912,"2912 px"},{3200,"3200 px"}},true},
         {"AntiAliasing","Edge anti-aliasing",Visuals,&Settings::msaa,0,8,2,"",{{0,"Off"},{2,"2x MSAA"},{4,"4x MSAA"},{8,"8x MSAA"}},true},
         {"TextureQuality","Texture quality",Visuals,&Settings::texture,0,2,1,"",{{2,"Low"},{1,"Medium"},{0,"High"}},true},

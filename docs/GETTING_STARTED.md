@@ -1,12 +1,12 @@
 # PORTAL_STEAM_FRAME_STANDALONE_VR
 The goal is simple. Portal in your pocket. Or backpack.... Hardcase? Whatever. I wanted Portal VR on the go. So here it is.
 
-## v0.1.0-beta.2 — first public standalone beta
+## v0.1.0-beta.3 — first public standalone beta
 
 Portal running locally in full VR on Steam Frame: tracked head and controllers,
 native Chell hands/body, portal gun, two-hand aiming, shoulder holstering,
 hand switching, body calibration and a movable VR settings panel.
-This is the **Audit-21 development build**, published November 18, 2026.
+This is the **Embodiment-23 development build**, published November 18, 2026.
 It is a community mod and is not affiliated with Valve.
 
 **This is a beta. The captured body-lighting crash path has been fixed. A later
@@ -15,7 +15,7 @@ system regularly. Portal traversal was observed in the logs; funneling and all
 momentum/carry combinations are not yet comprehensively qualified. No 72/90 FPS
 guarantee is made. Performance varies with scene, settings and recording.
 
-Download **Portal-Frame-VR-v0.1.0-beta.2.zip** from
+Download **Portal-Frame-VR-v0.1.0-beta.3.zip** from
 [Releases](https://github.com/CR4zyHoBb1T52P1Ck/PORTAL_STEAM_FRAME_STANDALONE_VR/releases).
 The source checkout is for development; the release ZIP includes the compiled DLL.
 
@@ -75,7 +75,7 @@ your saves or unrelated custom mods.
 
 ## Controls and setup
 
-- Triggers: blue/orange portals. Gun-hand grip: native use/grab.
+- Triggers: blue/orange portals. Either-hand grip: native use/grab; one held prop at a time.
 - Left stick: movement; right stick: turning. Left-handed controls are selectable.
 - Right A: jump; right B: crouch. Menu/View controls are shown in the bindings.
 - **Click both thumbsticks** to bring the mod menu in front of you.
@@ -147,3 +147,16 @@ Built on [BowmanFox/portal1vr](https://github.com/BowmanFox/portal1vr),
 Valve supplies Portal/SteamVR/OpenVR; other dependencies include MinHook and
 Qualcomm Snapdragon Game Super Resolution. See **THIRD_PARTY_NOTICES.md** and
 the bundled licenses. Existing copyright/license terms remain in effect.
+
+## Embodiment-23 controls and known limits
+
+World interactions > Physical contact contains hand/gun push toggles and force
+controls. Its subpages tune separate impact gains and gun wall clearance.
+Prop grab > Palm carry and object hand pose controls snap, offset and curl.
+Home > Crosshair and trigger colors keeps physical trigger colors consistent.
+Calibration, tuning and comfort > Body shape contains chest/hip width/depth;
+the owner could not find those sliders during the headset test, so menu
+discoverability remains a known issue. Cosmetic jiggle is subtle and is being
+reworked. Independent two-prop carry and hand-driven jiggle are not included.
+Portal-heavy scenes can run slower than ordinary rooms;71/72/90FPS is not
+guaranteed. See RELEASE_NOTES.md for owner observations and validation limits.

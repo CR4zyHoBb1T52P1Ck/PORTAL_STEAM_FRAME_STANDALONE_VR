@@ -45,8 +45,14 @@ struct Motion {
 struct Carry {
     void* controller=nullptr;void* entity=nullptr;int mode=-1,hand=-1;matrix3x4_t relative{};Motion motion;
     void Reset(){controller=entity=nullptr;mode=hand=-1;motion.Reset();}
-    matrix3x4_t Target(void* c,void* e,int m,int h,double now,const matrix3x4_t& handPose,const matrix3x4_t& object,float units) {
-        if(c!=controller||e!=entity||m!=mode||h!=hand){Reset();controller=c;entity=e;mode=m;hand=h;relative=HandPose::Concat(HandPose::InverseRigid(handPose),object);}
+    matrix3x4_t Target(void* c,void* e,int m,int h,double now,const matrix3x4_t& handPose,const matrix3x4_t& object,float units,float palmDistance=-1) {
+        if(c!=controller||e!=entity||m!=mode||h!=hand){Reset();controller=c;entity=e;mode=m;hand=h;relative=HandPose::Concat(HandPose::InverseRigid(handPose),object);
+            if(std::isfinite(palmDistance)&&palmDistance>=0){
+                auto direction=PortalPose::Position(relative);if(!TwoHandAim::Unit(direction))direction={1,0,0};
+                const auto offset=direction*std::clamp(palmDistance,0.f,units*.25f);
+                for(int r=0;r<3;++r)relative[r][3]=offset[r];
+            }
+        }
         motion.Push(now,handPose,units);return HandPose::Concat(handPose,relative);
     }
 };

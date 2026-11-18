@@ -58,7 +58,7 @@ void VR::ApplyGraphicsSettings() {
 void VR::HideOwnedOverlays() {
     if(!m_Overlay)return;
     for(auto handle:{m_MainMenuHandle,m_GraphicsHandle,m_GraphicsStagingHandle,m_MenuChrome,
-        m_MenuBeam[0],m_MenuBeam[1],m_MenuDot[0],m_MenuDot[1],m_VignetteHandle,m_FpsHandle})
+        m_MenuBeam[0],m_MenuBeam[1],m_MenuDot[0],m_MenuDot[1],m_VignetteHandle,m_FpsHandle,m_ReticleHandle})
         if(handle)m_Overlay->HideOverlay(handle);
 }
 void VR::RefreshSystemFocus(bool sampleActions) {
@@ -103,6 +103,8 @@ void VR::RefreshSystemFocus(bool sampleActions) {
     if(!m_SystemFocus.focused)HideOwnedOverlays();
 }
 void VR::ReleaseMenuInput() {
+    m_ContactResetUntil=GetTickCount64()+250;m_GunWallRetraction=0;m_SecondaryMotion.Reset();
+    if(m_ReticleHandle&&m_Overlay)m_Overlay->HideOverlay(m_ReticleHandle);
     m_PropHold.Suspend();
     m_ThrowReleaseUntil=0;m_HandContact[0]=m_HandContact[1]={};
     m_Weapon.Suspend();m_LegacyHapticUntil[0]=m_LegacyHapticUntil[1]=0;m_WeaponConsumesGrip=true;m_UseGripBlocked[0]=m_UseGripBlocked[1]=true;
@@ -208,7 +210,7 @@ void VR::ChangeGraphicsSetting(int row,int direction) {
             m_Graphics.leftX=m_Graphics.leftY=m_Graphics.leftZ=m_Graphics.leftPitch=m_Graphics.leftYaw=m_Graphics.leftRoll=0;
             m_Graphics.rightX=m_Graphics.rightY=m_Graphics.rightZ=m_Graphics.rightPitch=m_Graphics.rightYaw=m_Graphics.rightRoll=0;
             m_Graphics.controllerHands=true;
-        } else if(selected.action==VrMenu::OriginalBodyShape)m_Graphics.wristWidth=m_Graphics.forearmWidth=m_Graphics.upperArmWidth=m_Graphics.handSize=m_Graphics.torsoWidth=100;
+        } else if(selected.action==VrMenu::OriginalBodyShape)m_Graphics.chestScale=m_Graphics.hipScale=m_Graphics.wristWidth=m_Graphics.forearmWidth=m_Graphics.upperArmWidth=m_Graphics.handSize=m_Graphics.torsoWidth=100;
         else {
             const int physical=selected.target;const bool logicalLeft=(physical==0)!=m_LeftHanded;
             if(!m_ActionStateFresh||!(logicalLeft?m_LeftControllerPose.isValid:m_RightControllerPose.isValid)){m_GraphicsStatus="Matching controller must be tracked.";break;}
@@ -279,6 +281,7 @@ vr::EVROverlayError VR::UploadOverlayFile(vr::VROverlayHandle_t handle,const std
     return SUCCEEDED(result)?vr::VROverlayError_None:vr::VROverlayError_RequestFailed;
 }
 void VR::OverlayTextureSubmitted(vr::VROverlayHandle_t handle,vr::EVROverlayError result) {
+    if(handle==m_ReticleHandle){m_ReticleReady=result==vr::VROverlayError_None;m_ReticlePending=false;return;}
     if(result!=vr::VROverlayError_None) {
         PortalVrLog("GPU overlay submission handle=%llu error=%d",handle,result);
         if(handle==m_GraphicsStagingHandle&&m_MenuRaster.pending){m_MenuRaster.Failed(GetTickCount64());m_GraphicsDirty=true;}
@@ -345,6 +348,10 @@ void VR::UpdateGraphicsMenu() {
         else if(m_MenuPage==VrMenu::Holster)output="Bring gun hand over a shoulder and squeeze. Squeeze there again to draw.";
         else if(m_MenuPage==VrMenu::Feedback)output="Use left/right test buttons. Strength 0 silences all weapon pulses.";
         else if(m_MenuPage==VrMenu::Arms)output="Hand visibility and placement. Native body and IK has optional body solving.";
+        else if(m_MenuPage==VrMenu::Crosshair)output="Trigger colors stay on the same physical controller across gun handoffs.";
+        else if(m_MenuPage==VrMenu::Fingers)output="Gun grip is a curl floor; tracked fingers can curl further. Thumb pose is optional.";
+        else if(m_MenuPage==VrMenu::Jiggle)output="Small damped visual body response only. Bone positions and movement stay fixed.";
+        else if(m_MenuPage==VrMenu::PhysicalContact)output="Controller swings push movable props. Native player/portal travel is not driven.";
         else if(m_MenuPage==VrMenu::TPose)output="Stand upright, arms sideways. Release triggers; hold BOTH for 1 second.";
         else if(m_MenuPage==VrMenu::Measurements)output="Head + hands measure reach/drop. Shoulder width is an adjustable estimate.";
         else if(m_MenuPage==VrMenu::BodyShape)output="Cuff inflation thickens the wrist/forearm without widening the fingers.";
@@ -485,6 +492,8 @@ matrix3x4_t VR::GetAvatarHandFrame(bool physicalLeft,bool contact) {
         result=NativeFit::Rotate(result,logicalLeft?g.leftPitch:g.rightPitch,logicalLeft?g.leftYaw:g.rightYaw,logicalLeft?g.leftRoll:g.rightRoll);
         for(int r=0;r<3;++r)result[r][3]=p[r];
     }
+    if(g.gunWallContact&&!m_Weapon.stowed&&((physicalLeft==primaryLeft&&(g.controllerHands||!g.gripHand))||(physicalLeft!=primaryLeft&&m_OptionalSupportActive&&!g.snapSupportHand)))
+        for(int r=0;r<3;++r)result[r][3]-=m_GunWallDirection[r]*m_GunWallRetraction;
     const auto& touch=m_HandContact[physicalLeft?0:1];
     if(contact&&g.handContact&&touch.valid&&touch.touching&&GetTickCount64()-touch.time<150&&InteractionAllowed())return touch.frame;
     return result;
@@ -500,14 +509,97 @@ matrix3x4_t VR::GetCanonicalGunFrame() {
 matrix3x4_t VR::GetRawGunControllerFrame(){
     return GetCanonicalGunFrame();
 }
-matrix3x4_t VR::GetGunControllerFrame() {
+matrix3x4_t VR::GetGunControllerFrame(bool contact) {
     const auto raw=GetRawGunControllerFrame();
     const bool enabled=m_Graphics.twoHandAim&&m_LeftHandGunGrip&&m_OptionalSupportActive&&m_SupportLastSeen
         &&m_PortalAimLastSeen&&m_SystemFocus.Allowed()&&!m_GraphicsOpen&&!m_Game->IsCursorVisible()&&!m_Weapon.stowed
         &&m_LeftControllerPose.isValid&&m_RightControllerPose.isValid;
     const Vector pivot=m_Weapon.hand==0?GetLeftControllerAbsPos():GetRightControllerAbsPos();
-    return TwoHandAim::Solve(raw,pivot,WeaponPosition(true),m_SupportFromController,
+    auto result=TwoHandAim::Solve(raw,pivot,WeaponPosition(true),m_SupportFromController,
         enabled,m_Graphics.twoHandPercent/100.f,m_VRScale*.06f);
+    if(contact&&m_Graphics.gunWallContact&&!m_Weapon.stowed)for(int r=0;r<3;++r)result[r][3]-=m_GunWallDirection[r]*m_GunWallRetraction;
+    return result;
+}
+bool VR::PortalContactClearance() {
+    if(GetTickCount64()<m_ContactResetUntil)return true;
+    if(!m_Graphics.portalContactBypass||!m_Game)return false;
+    static const auto binding=PortalTrace::Binding::Resolve(m_Game->m_BaseClient);
+    return binding.Environment(m_Game->GetLocalPortalPlayer())!=nullptr;
+}
+void VR::UpdateGunWallContact() {
+    const auto previous=m_GunWallOffset;m_GunWallRetraction=0;m_GunWallOffset={0,0,0};
+    if(!m_Graphics.gunWallContact||!InteractionAllowed()||PortalContactClearance()||m_Weapon.stowed||!WeaponTracked()||!m_PortalAimLastSeen){m_GunWallTouch=false;return;}
+    auto* player=m_Game->GetLocalPortalPlayer();if(!player)return;
+    const auto barrel=HandPose::Concat(GetGunControllerFrame(false),m_PortalAimFromController);
+    // Always sweep from the protected head side of geometry. A controller
+    // pushed through a wall cannot invalidate the sweep's starting position.
+    const Vector start=GetViewOrigin(m_SetupOrigin),end=TwoHandAim::Position(barrel);
+    if(!TwoHandAim::Finite(start)||!TwoHandAim::Finite(end)||(end-start).LengthSqr()>m_VRScale*m_VRScale*4)return;
+    Ray_t ray;const float radius=m_Graphics.gunWallRadiusCM*m_VRScale/100;
+    ray.Init(start,end,{-radius,-radius,-radius},{radius,radius,radius});CGameTrace hit{};hit.fraction=1;
+    CTraceFilterSkipEntity filter(reinterpret_cast<IHandleEntity*>(player),0);
+    static const auto binding=PortalTrace::Binding::Resolve(m_Game->m_BaseClient);
+    bool traced=binding.Trace(player,ray,0x0601400b,&filter,&hit)||m_Game->TraceRay(ray,0x0601400b,&filter,&hit);
+    if(traced&&(hit.startsolid||hit.allsolid)) {
+        // Narrow passage/door jamb: a point sweep avoids an inflated hull
+        // retaining a collision after the muzzle itself has a clear route.
+        ray.Init(start,end);hit={};hit.fraction=1;
+        traced=binding.Trace(player,ray,0x0601400b,&filter,&hit)||m_Game->TraceRay(ray,0x0601400b,&filter,&hit);
+    }
+    const bool touch=traced&&!hit.startsolid&&!hit.allsolid&&hit.fraction<.995f&&TwoHandAim::Unit(hit.plane.normal);
+    auto correction=touch?GunContact::Correction(end,hit.endpos,hit.plane.normal,m_VRScale*.005f,m_Graphics.gunWallLimitCM*m_VRScale/100):Vector(0,0,0);
+    if(!touch)correction=previous*(1-std::clamp(m_Graphics.gunWallRelease/100,.1f,1.f));
+    m_GunWallRetraction=sqrtf(correction.LengthSqr());m_GunWallOffset=correction;
+    if(m_GunWallRetraction>.0001f)m_GunWallDirection=-correction*(1/m_GunWallRetraction);
+    if(touch&&!m_GunWallTouch)WeaponHaptic(WeaponHand(),.6f,m_Graphics.contactHaptics);
+    m_GunWallTouch=touch;
+}
+void VR::SnapshotContactPoints() {
+    m_ContactSnapshot=GetTickCount64();for(auto& valid:m_ContactValid)valid=false;
+    if((!m_Graphics.handPush&&!m_Graphics.gunPush)||!InteractionAllowed())return;
+    const auto snapshot=[&](int slot,Vector point){
+        if(!TwoHandAim::Finite(point))return;
+        m_ContactRelative[slot]=PortalPose::RelativeHand(point-m_SetupOrigin,{0,0,0},m_HmdAngAbs);m_ContactValid[slot]=true;
+    };
+    if(m_Graphics.handPush&&m_ActionStateFresh&&m_LeftControllerPose.isValid)snapshot(0,GetLeftHandAbsPos());
+    if(m_Graphics.handPush&&m_ActionStateFresh&&m_RightControllerPose.isValid)snapshot(1,GetRightHandAbsPos());
+    if(m_Graphics.gunPush&&!m_Weapon.stowed&&WeaponTracked()&&m_PortalAimLastSeen) {
+        const auto barrel=HandPose::Concat(GetGunControllerFrame(false),m_PortalAimFromController);
+        const auto start=WeaponPosition(),end=TwoHandAim::Position(barrel);
+        if((end-start).LengthSqr()<m_VRScale*m_VRScale*2) {
+            snapshot(2,start);snapshot(3,(start+end)*.5f);snapshot(4,end);
+        }
+    }
+}
+void VR::UpdateCrosshair() {
+    const auto& g=m_Graphics;if(!m_Overlay)return;
+    if(!g.crosshair||!InteractionAllowed()||m_Weapon.stowed||!g.gun||!WeaponTracked()) {
+        if(m_ReticleHandle)m_Overlay->HideOverlay(m_ReticleHandle);return;
+    }
+    if(!m_ReticleHandle) {
+        m_Overlay->CreateOverlay("portal.frame.aim.reticle","Portal aim reticle",&m_ReticleHandle);if(!m_ReticleHandle)return;
+        m_Overlay->SetOverlayInputMethod(m_ReticleHandle,vr::VROverlayInputMethod_None);
+        m_Overlay->SetOverlayFlag(m_ReticleHandle,vr::VROverlayFlags_VisibleInDashboard,false);
+        m_Overlay->SetOverlaySortOrder(m_ReticleHandle,30);
+    }
+    const int key=g.crosshair+g.crosshairColor*8+int(g.crosshairOpacity)*64;const auto now=GetTickCount64();
+    if((key!=m_ReticleKey||!m_ReticleReady)&&!m_ReticlePending&&now>=m_ReticleRetry) {
+        const auto pixels=Reticle::Pixels(g.crosshair,g.crosshairColor,g.crosshairOpacity/100);
+        const auto result=UploadOverlayFile(m_ReticleHandle,pixels,128,128,"aim-reticle");
+        m_ReticleRetry=now+1000;m_ReticlePending=result==vr::VROverlayError_None;
+        if(m_ReticlePending){m_ReticleKey=key;m_ReticleReady=false;}
+    }
+    Vector source,direction;if(!GetPortalAimRay(source,direction))return;
+    const Vector head=GetViewOrigin(m_SetupOrigin);
+    Vector delta=(g.crosshairDepth&&TwoHandAim::Finite(m_AimPos)?m_AimPos:source+direction*(g.crosshairDistance*m_VRScale))-head;
+    if(TwoHandAim::Dot(delta,m_HmdForward)<=0||delta.LengthSqr()<m_VRScale*m_VRScale*.0225f)delta=source+direction*(g.crosshairDistance*m_VRScale)-head;
+    const float distance=sqrtf(delta.LengthSqr());if(distance>m_VRScale*30)delta=delta*(m_VRScale*30/distance);
+    const auto relative=Reticle::TrackingOffset(delta,m_HmdForward,m_HmdRight,m_HmdUp,m_VRScale);
+    auto pose=m_Poses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking;
+    for(int r=0;r<3;++r)pose.m[r][3]+=pose.m[r][0]*relative.x+pose.m[r][1]*relative.y+pose.m[r][2]*relative.z;
+    m_Overlay->SetOverlayTransformAbsolute(m_ReticleHandle,vr::VRCompositor()->GetTrackingSpace(),&pose);
+    m_Overlay->SetOverlayWidthInMeters(m_ReticleHandle,g.crosshairMM/1000);
+    if(m_ReticleReady)m_Overlay->ShowOverlay(m_ReticleHandle);
 }
 #include "vrcalibration_impl.h"
 #include "vrmenuinteraction_impl.h"
