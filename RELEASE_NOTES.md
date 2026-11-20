@@ -1,43 +1,44 @@
-# v0.1.0-beta.3 - Embodiment-23
+# EMERGENCY DAY ONE WOOPS PATCH — v0.1.0-beta.4
 
-The owner-tested contact, gun and customization update. Uses the exact tested
-Embodiment-23 DLL, retaining the Audit-21 lighting/crash-path fix.
+Fixes direct standalone launching from the Steam Frame library. No PC or Wi-Fi
+is required to launch or play after the game/runtime and shortcut are set up.
 
-- Stronger, independently adjustable hand/gun impacts, impulse caps and cooldown.
-  Embedded contacts recover a surface query; stationary force traces are skipped.
-- Gun wall correction follows a protected head-to-muzzle sweep, with adjustable
-  radius, displacement limit and release response. Portal-environment bypass and
-  crossing/loading/menu resets protect native movement and funneling behavior.
-- Complete rigid rear gun housing generated from owned retail assets, with an
-  inner lining; native hands, glass, moving claws and animations are preserved.
-- Either controller selects native props, independently of float/palm carry.
-  Optional palm snap, offset and approximate finger curl. One native held object
-  remains supported; independent dual-object carry is not implemented.
-- Fixed physical trigger portal colors across handoffs, saved thumb extension,
-  crosshair options, body calibration and cosmetic body customization controls.
-- Existing reusable GPU menus and scene rendering retained; redundant paired-hand
-  draws are skipped when the current full-body palette provides those hands.
+**Existing users: run Install.py, then FrameSetup.py on your Frame and update
+your Steam shortcut using the settings it prints. Replacing the DLL alone does
+not repair the shortcut.** See [the setup guide](https://github.com/CR4zyHoBb1T52P1Ck/PORTAL_STEAM_FRAME_STANDALONE_VR/blob/main/docs/GETTING_STARTED.md).
 
-Owner feedback: impacts and wall contact are substantially improved, the gun
-looks good, and ordinary scenes run near71FPS in this setup. Looking at a portal
-or multiple portals still causes slowdown. These are owner observations, not a
-sustained performance guarantee or a GPU benchmark.
+The old shortcut targeted hl2.exe directly. Portal regenerates a steam_appid.txt
+file identifying app400; Steam can then refuse the next unmanaged/devkit launch
+because it does not consider that app installed. Development's PC launcher
+archived this marker, so that path worked while direct headset Play failed.
+The published instructions also omitted the required -dx9 renderer argument.
 
-Known issues: the owner did not find chest/hip sliders in the headset menu and
-wants more pronounced jiggle. Those controls exist in this build's Body shape
-page but visibility/discoverability and response remain under investigation.
-Hand-driven body response is NOT included. Portal-heavy optimization and those
-body improvements are next-build work, not claimed fixed in this release.
-Historical abrupt headset power-off cause remains unconfirmed.
+This patch supplies a marker-free Windows relay folder and a Frame-local launch
+prefix. It archives the expected generated marker, applies saved startup
+settings, starts the local restart helper, and launches Portal in the correct
+working directory with -dx9 and the native d3d9 override. Unexpected app-ID
+contents are preserved and reported. All startup/exit logging is local and
+silent. No remote desktop, personal log uploader or recurring PC task is needed.
+Steam shortcut paths/options still need to be set as printed by FrameSetup.py;
+the tool does not install Proton/FEX or transfer the owned game for you.
 
-Validation:76 host tests, owned native ABI and portal/camera checks, AddressSanitizer
-body/leg/contact/palm/portal-skin checks and overlay pixel/queue regressions pass.
-CPU checks do not establish headset/GPU stability. Save progress regularly.
-Experimental hand contact, pushes, palm carry, throws and jiggle default off;
-enable the features you want in World interactions / Arms / Jiggle.
+New-install gun grab defaults are Devon's latest tested alignment:
+right -2 cm, up -3 cm, forward -3.5 cm. Existing saved preferences are preserved.
+You can still adjust the grip in the VR menu. These are configuration defaults;
+the existing explicit authored-grip reset behavior is unchanged.
 
-Install.py verifies the mod package, generates gun/hands from your owned Windows
-Portal assets, preserves existing settings and creates rollback backups. Keep
-your working Frame runtime/shortcut setup. No game assets, drivers, recordings,
-private logs or generated retail models are distributed. Existing credits and
-license are preserved. No automatic gameplay test deadline or termination.
+Uses the exact tested Embodiment-23 / beta.3 game DLL. No unfinished interaction,
+body/jiggle, crosshair or performance prototypes are bundled. The owner confirmed
+the repaired library launch worked perfectly on the Frame. Portable setup and
+identity/path/checksum behavior are covered by host tests; CPU relay checks pass
+on Windows and Frame. Other users' runtime/shortcut setups can differ.
+
+The mod remains beta software. Portal-heavy frame-rate drops and existing
+experimental interaction/body limitations remain. This patch does not claim
+those gameplay fixes or diagnose historical headset power-offs.
+
+All previous credits, license and upstream notices are preserved. Requires
+your own Windows x86 Steam Portal assets and a working Frame ARM64 Proton/FEX
+VR environment. No retail game assets, recordings, saves, private logs or SSH
+credentials are distributed. No game is launched by either setup tool, and no
+automatic gameplay deadline, watchdog kill or termination is installed.

@@ -1,3 +1,13 @@
+# EMERGENCY DAY ONE WOOPS PATCH
+
+[Download v0.1.0-beta.4](https://github.com/CR4zyHoBb1T52P1Ck/PORTAL_STEAM_FRAME_STANDALONE_VR/releases/tag/v0.1.0-beta.4) — fixes direct Frame-library standalone launches.
+
+**Upgrade requires the new Frame-local launcher setup, not just a DLL copy.**
+Run Install.py, then FrameSetup.py on Frame, and apply the printed Steam shortcut settings.
+[Installation and upgrade steps](docs/GETTING_STARTED.md). No PC/Wi-Fi is needed to play afterward.
+
+---
+
 # PORTAL_STEAM_FRAME_STANDALONE_VR
 The goal is simple. Portal in your pocket. Or backpack.... Hardcase? Whatever. I wanted Portal VR on the go. So here it is.
 

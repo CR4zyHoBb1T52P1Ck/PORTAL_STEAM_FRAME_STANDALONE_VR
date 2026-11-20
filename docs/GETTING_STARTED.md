@@ -1,12 +1,12 @@
 # PORTAL_STEAM_FRAME_STANDALONE_VR
 The goal is simple. Portal in your pocket. Or backpack.... Hardcase? Whatever. I wanted Portal VR on the go. So here it is.
 
-## v0.1.0-beta.3 — first public standalone beta
+## v0.1.0-beta.4 — EMERGENCY DAY ONE WOOPS PATCH
 
 Portal running locally in full VR on Steam Frame: tracked head and controllers,
 native Chell hands/body, portal gun, two-hand aiming, shoulder holstering,
 hand switching, body calibration and a movable VR settings panel.
-This is the **Embodiment-23 development build**, published November 18, 2026.
+This is the **Embodiment-23 development build**, with the standalone-launch emergency patch published November 20, 2026.
 It is a community mod and is not affiliated with Valve.
 
 **This is a beta. The captured body-lighting crash path has been fixed. A later
@@ -15,7 +15,7 @@ system regularly. Portal traversal was observed in the logs; funneling and all
 momentum/carry combinations are not yet comprehensively qualified. No 72/90 FPS
 guarantee is made. Performance varies with scene, settings and recording.
 
-Download **Portal-Frame-VR-v0.1.0-beta.3.zip** from
+Download **Portal-Frame-VR-v0.1.0-beta.4.zip** from
 [Releases](https://github.com/CR4zyHoBb1T52P1Ck/PORTAL_STEAM_FRAME_STANDALONE_VR/releases).
 The source checkout is for development; the release ZIP includes the compiled DLL.
 
@@ -47,25 +47,50 @@ The source checkout is for development; the release ZIP includes the compiled DL
    from your own retail VPKs, and preserves existing settings and comments.
    Changed files are backed up under `.portal-frame-backups` in the game folder.
    It never starts or terminates Portal. A failed write attempts rollback.
-3. If installing on your PC, transfer your patched Windows game folder to Frame
-   using your Steam developer/devkit transfer workflow. This repository does not
-   include Steam Frame runtime installation or a universal one-click deployment.
-4. Add/select the copied `hl2.exe` as a **VR** Steam shortcut on Frame. Set its
-   working directory to the game folder and force the ARM64 Proton/FEX runtime.
-   Start from the following launch options:
+3. If installing on your PC, transfer the patched **Windows** game folder to
+   Frame using your existing developer/devkit transfer workflow. Transfer this
+   extracted release folder too. Runtime/Proton/FEX installation and game
+   transfer are prerequisites; these tools do not install those components.
+4. On Frame, from the extracted release directory, prepare its local launcher:
 
    ```sh
-   WINEDLLOVERRIDES="d3d9=n,b" SteamAppId=400 SteamGameId=400 %command% -steam -game portal -insecure -window -novid -width 1280 -height 720 +mat_queue_mode 0 +mat_vsync 0 +mat_antialias 0
+   python3 FrameSetup.py --portal-dir "/actual/path/to/Portal" --dry-run
+   python3 FrameSetup.py --portal-dir "/actual/path/to/Portal"
    ```
 
-   The desktop window is not the eye render resolution. Adjust eye resolution
-   through the VR settings. Existing working Frame shortcut/runtime settings
-   should be kept. The headset must run the game locally; PC streaming is not
-   required for standalone play.
-5. A devkit launch can generate `steam_appid.txt` containing `400`. If the next
-   shortcut launch fails, back up that file outside the game directory and retry.
-   Preserve an unexpected value and investigate. `tools/frame/appid_guard.py`
-   contains the checked archive operation used during development.
+   Replace the path with your copied Windows Portal directory. The tool prints
+   an **executable**, **working directory** and full **launch options** and saves
+   them in `Steam-Shortcut-Settings.txt` beside the game in its setup folder.
+   Keep that setup folder on Frame. It contains the launcher, not a PC service.
+5. Edit your existing Portal VR non-Steam shortcut, or add the printed
+   `portal-standalone.exe` as a new non-Steam shortcut. Set its executable and
+   working directory to the printed values. Mark it as VR / include it in the
+   VR library, select your working **ARM64 Proton/FEX** compatibility runtime
+   (development used Proton11 ARM64), and paste the **entire printed launch
+   options line** into Launch Options. Keep `%command%` exactly as printed.
+
+   **Target the relay executable and its separate launch folder, not hl2.exe
+   or the game folder.** The new command includes `-dx9` and
+   `WINEDLLOVERRIDES="d3d9=n,b"`; both are needed for this mod. Do not add
+   `SteamAppId=400` / `SteamGameId=400` overrides from the older instructions.
+   The launcher starts the real game from its correct working directory.
+6. Press Play **in the Frame library**. Once these local files/runtime and the
+   shortcut are configured, the PC can be disconnected. Local logs are silent,
+   and there is no automatic game/test deadline. Quit in-game or use Steam Stop
+   when you decide to finish. Visual-resource changes can use the mod menu's
+   Restart Portal button; missing restart identity falls back to manual restart.
+
+### Upgrading from beta.1�beta.3
+
+Close Portal yourself, run the new `Install.py` and `FrameSetup.py`, then update
+the shortcut as above. **A DLL-only update leaves the old launch bug intact.**
+Existing config, calibration and saves are preserved. Fresh installs receive
+the tuned gun grab point: right -2cm, up -3cm, forward -3.5cm. Existing users can
+choose those values in the gun grab menu without replacing their other settings.
+
+The launch prefix archives only Portal's expected generated `400` app-ID marker
+before the game starts. An unexpected marker is preserved and reported in the
+local launch log. You should not have to manually remove this file each run.
 
 The installer accepts the verified retail asset layout and stops on unsupported
 assets. It does not modify saves or retail VPKs. To roll back, close Portal,
@@ -101,18 +126,20 @@ Home > **World interactions (beta)** contains three independent features:
 
 All three default **off** in this public beta. Enable individually. Stow the gun
 to try hand contact/carry. There is one native held object; dual independent
-grabs, pushing unheld props with palms and a fully simulated avatar are not
-implemented. Legs and shoulders are inferred from head/controllers.
+grabs and a fully simulated avatar are not implemented. Optional hand/gun
+impacts are available under Physical contact. Legs and shoulders are inferred from head/controllers.
 
 The rigid fitted torso fix is enabled for calibrated bodies, with fixed torso
 length and camera clearance controls. Portal gun/back model and portal previews
-were confirmed in prior headset testing. Physics-16 still needs further headset
+were confirmed in prior headset testing. This beta still needs further headset
 qualification, including portal momentum/funneling and contact edge cases.
 
 ## Logs and reporting
 
 The runtime writes local silent diagnostics to `portalvr.log` in the game working directory (a Proton log
-may also be enabled by your launch configuration). No personal log uploader or
+may also be enabled by your launch configuration). Frame-local launcher records
+are stored in the printed setup folder under `Standalone-Launch/Attempts`.
+They preserve startup errors and process exit codes without showing consoles. No personal log uploader or
 background scheduled task is installed. This release includes no device IPs,
 SSH keys, personal recordings, saves or private test logs.
 Report reproduction steps, settings, runtime version and the relevant final log
