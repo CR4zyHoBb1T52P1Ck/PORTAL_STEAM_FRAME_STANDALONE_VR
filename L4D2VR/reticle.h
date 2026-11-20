@@ -13,6 +13,11 @@ inline std::vector<uint32_t> Pixels(int shape,int color,float opacity) {
         if(lit||outline){const auto rgb=lit?colors[std::clamp(color,0,4)]:0x080808;result[y*128+x]=(alpha<<24)|((rgb&255)<<16)|(rgb&0xff00)|((rgb>>16)&255);}
     }return result;
 }
+inline float Width(int shape,float mm,float distance) {
+    if(!std::isfinite(mm)||!std::isfinite(distance))return .05f;
+    const float visiblePixels=shape==1?18.f:shape==2?70.f:60.f;
+    return std::clamp(std::clamp(mm,2.f,40.f)*.001f*std::clamp(distance,.15f,30.f)*128/visiblePixels,.002f,9.f);
+}
 inline Vector TrackingOffset(Vector delta,Vector forward,Vector right,Vector up,float units) {
     if(units<1||!TwoHandAim::Finite(delta))return {0,0,0};
     return {TwoHandAim::Dot(delta,right)/units,TwoHandAim::Dot(delta,up)/units,-TwoHandAim::Dot(delta,forward)/units};

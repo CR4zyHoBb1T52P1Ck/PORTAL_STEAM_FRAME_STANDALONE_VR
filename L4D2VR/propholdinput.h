@@ -9,10 +9,12 @@ struct Input {
     void CancelThrow(){throwRelease=false;if(release)cancelled=true;}
     void Suspend(){use=false;throwRelease=false;cancelled=true;release=attached;armed[0]=armed[1]=false;if(!attached)hand=-1;}
     void Attach(){if(hand>=0)attached=true;}
-    void Step(bool allowed,const bool grip[2],const bool tracked[2],const bool eligible[2]) {
+    void Step(bool allowed,const bool grip[2],const bool tracked[2],const bool eligible[2],bool transferNear=false) {
         if(!allowed){Suspend();return;}
         bool rising[2]{};
         for(int h=0;h<2;++h){if(!tracked[h])armed[h]=false;if(tracked[h]&&!grip[h])armed[h]=true;rising[h]=tracked[h]&&armed[h]&&grip[h]&&!previous[h];}
+        if(hand>=0&&attached&&!release&&transferNear){const int other=1-hand;
+            if(rising[other]&&eligible[other]){hand=other;use=true;throwRelease=cancelled=false;}}
         if(hand>=0) {
             if(!tracked[hand]||!grip[hand]) {
                 use=false;

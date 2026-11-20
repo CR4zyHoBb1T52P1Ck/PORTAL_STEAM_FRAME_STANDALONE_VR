@@ -11,16 +11,16 @@ void VR::SampleFrameDiagnostics() {
         vr::Compositor_FrameTiming timing{};timing.m_nSize=sizeof(timing);
         const bool available=vr::VRCompositor()->GetFrameTiming(&timing);
         const auto& left=m_VKLeftEye.m_VulkanData;const auto& right=m_VKRightEye.m_VulkanData;
-        PortalVrLog("VR frame timing phase=%s samples=%u meanMs=%f p95Ms=%f fps=%f eyeCpuMeanMs=%f gpuWaitMeanMs=%f compositorGpuLastMs=%f left=%ux%u right=%ux%u upscaleReady=%d output=%ux%u",
+        PortalVrLog("VR frame timing phase=%s samples=%u meanMs=%f p95Ms=%f fps=%f eyeCpuMeanMs=%f gpuWaitMeanMs=%f compositorGpuLastMs=%f left=%ux%u right=%ux%u upscaleReady=%d output=%ux%u secondaryViewsMean=%f maxViewDepth=%u bodyCpuMeanMs=%f avatarRebasesMean=%f avatarCacheHitsMean=%f",
             names[m_FrameTimingPhase],unsigned(window.frames.size()),window.Mean(),window.P95(),1000/window.Mean(),window.eye/window.frames.size(),window.wait/window.frames.size(),
             available?timing.m_flPreSubmitGpuMs:-1,left.m_nWidth,left.m_nHeight,right.m_nWidth,right.m_nHeight,m_UpscaleReady,
-            m_UpscaleReady?m_VKUpscaledLeft.m_VulkanData.m_nWidth:left.m_nWidth,m_UpscaleReady?m_VKUpscaledLeft.m_VulkanData.m_nHeight:left.m_nHeight);
+            m_UpscaleReady?m_VKUpscaledLeft.m_VulkanData.m_nWidth:left.m_nWidth,m_UpscaleReady?m_VKUpscaledLeft.m_VulkanData.m_nHeight:left.m_nHeight,window.secondary/window.frames.size(),window.maxViewDepth,window.body/window.frames.size(),window.rebases/window.frames.size(),window.cacheHits/window.frames.size());
     };
     if(phase!=m_FrameTimingPhase) {
         report();m_FrameTimingWindow.Clear();m_FrameTimingPhase=phase;m_FrameTimingPrevious=0;m_FrameTimingStart=now;
         PortalVrLog("VR render phase=%s",names[phase]);
     }
-    if(m_FrameTimingPrevious)m_FrameTimingWindow.Add(float(now-m_FrameTimingPrevious)/1000,phase>=2?m_LastEyeRenderMs:0,m_LastGpuWaitMs);
+    if(m_FrameTimingPrevious)m_FrameTimingWindow.Add(float(now-m_FrameTimingPrevious)/1000,phase>=2?m_LastEyeRenderMs:0,m_LastGpuWaitMs,phase>=2?m_LastSecondaryViews:0,phase>=2?m_LastViewDepth:0,phase>=2?m_LastAvatarRebases:0,phase>=2?m_LastAvatarCacheHits:0,phase>=2?m_LastBodyBuildMs:0);
     m_FrameTimingPrevious=now;if(!m_FrameTimingStart)m_FrameTimingStart=now;
     if(now-m_FrameTimingStart>=2000000){report();m_FrameTimingWindow.Clear();m_FrameTimingStart=now;}
 }

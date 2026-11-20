@@ -1,44 +1,70 @@
-# EMERGENCY DAY ONE WOOPS PATCH — v0.1.0-beta.4
+# Interaction-26 nightly â€” November 20, 2026
 
-Fixes direct standalone launching from the Steam Frame library. No PC or Wi-Fi
-is required to launch or play after the game/runtime and shortcut are set up.
+This is an experimental nightly prerelease for Steam Frame standalone and
+Windows PCVR/SteamVR. It contains the exact Interaction-26 DLL installed for
+the owner's next test. In-headset/GPU qualification is still pending. Stable
+emergency beta.4 remains available separately; this nightly does not establish
+a fix for historical headset black screens or guarantee frame rates.
 
-**Existing users: run Install.py, then FrameSetup.py on your Frame and update
-your Steam shortcut using the settings it prints. Replacing the DLL alone does
-not repair the shortcut.** See [the setup guide](https://github.com/CR4zyHoBb1T52P1Ck/PORTAL_STEAM_FRAME_STANDALONE_VR/blob/main/docs/GETTING_STARTED.md).
+## Changes
 
-The old shortcut targeted hl2.exe directly. Portal regenerates a steam_appid.txt
-file identifying app400; Steam can then refuse the next unmanaged/devkit launch
-because it does not consider that app installed. Development's PC launcher
-archived this marker, so that path worked while direct headset Play failed.
-The published instructions also omitted the required -dx9 renderer argument.
+- Gun-stowed grabs select direct palm carry. Carry style stays latched until
+  release. Surface acquisition, visible-hand binding and grip handoffs improve
+  holding; release velocity determines drop/throw. Drawing or handing off the
+  gun preserves an already-held prop.
+- Both hands gain conservative gun-surface finger stops and an optional scoped
+  scene-depth correction for gun rendering. Tracking and gun aim stay separate.
+- Sustained pressure works for slow hand/gun pushes. Optional sandbox settings
+  offer up to 10x push/melee and 5x throw; finite final limits remain.
+- Creator controls add native demo recording/playback, pause/speed/timeline and
+  desktop head/follow/orbit/free cameras. Cameras are opt-in extra render work.
+- Windows PCVR launcher adds installation, runtime checks, per-attempt logs,
+  explicit restart support and local diagnostic ZIP export.
+- Includes intervening crosshair angular-size, portal/body-cache and body-menu
+  work. These changes have not been measured for headset performance gains.
 
-This patch supplies a marker-free Windows relay folder and a Frame-local launch
-prefix. It archives the expected generated marker, applies saved startup
-settings, starts the local restart helper, and launches Portal in the correct
-working directory with -dx9 and the native d3d9 override. Unexpected app-ID
-contents are preserved and reported. All startup/exit logging is local and
-silent. No remote desktop, personal log uploader or recurring PC task is needed.
-Steam shortcut paths/options still need to be set as printed by FrameSetup.py;
-the tool does not install Proton/FEX or transfer the owned game for you.
+## Install or update
 
-New-install gun grab defaults are Devon's latest tested alignment:
-right -2 cm, up -3 cm, forward -3.5 cm. Existing saved preferences are preserved.
-You can still adjust the grip in the VR menu. These are configuration defaults;
-the existing explicit authored-grip reset behavior is unchanged.
+Download the runtime ZIP (the source ZIP is for building). Extract everything.
+Requires your own Windows x86 Steam Portal assets; no retail assets are included.
 
-Uses the exact tested Embodiment-23 / beta.3 game DLL. No unfinished interaction,
-body/jiggle, crosshair or performance prototypes are bundled. The owner confirmed
-the repaired library launch worked perfectly on the Frame. Portable setup and
-identity/path/checksum behavior are covered by host tests; CPU relay checks pass
-on Windows and Frame. Other users' runtime/shortcut setups can differ.
+**Frame:** close Portal yourself, run Install.py against your owned game folder,
+then run FrameSetup.py on Frame and use its printed Steam shortcut settings.
+Re-run FrameSetup.py for this update even after beta.4: it refreshes the launch
+profile's DLL hash. A DLL-only copy leaves that profile out of date. The repaired
+marker-free local relay/prefix is retained. No PC/Wi-Fi is required afterward.
+See docs/GETTING_STARTED.md for the complete setup commands and requirements.
 
-The mod remains beta software. Portal-heavy frame-rate drops and existing
-experimental interaction/body limitations remain. This patch does not claim
-those gameplay fixes or diagnose historical headset power-offs.
+**Windows PCVR (experimental):** Python 3 with Tk, Steam, SteamVR and working
+x86 Vulkan support are required. Double-click Launch-PCVR.pyw, select your owned
+Portal directory, install/update, optionally enable the PC mirror profile,
+start SteamVR and press Play. Native PC GPU/headset/controller use is untested.
 
-All previous credits, license and upstream notices are preserved. Requires
-your own Windows x86 Steam Portal assets and a working Frame ARM64 Proton/FEX
-VR environment. No retail game assets, recordings, saves, private logs or SSH
-credentials are distributed. No game is launched by either setup tool, and no
-automatic gameplay deadline, watchdog kill or termination is installed.
+Existing preferences and saves are preserved by the installer. New installs
+retain generic body defaults and the approved grab offset (-2/-3/-3.5cm).
+Contact, force/throw and sandbox features remain optional. Tune one at a time.
+Click both thumbsticks for the VR mod menu. See docs/INTERACTION26.md for controls.
+
+## Limits and testing
+
+- One native carried prop plus portal gun; independent dual-prop carry is not
+  implemented. Finger stops use approximate proxies, not a full concave collider.
+- Native linked-portal carry owns cross-portal behavior; native player movement
+  and funneling are retained. Contact/portal edge cases still need headset tests.
+- Native demos capture world/game events, not injected VR finger/body poses.
+  Creator cameras change desktop output only. Full VR-pose replay, stereo flycam
+  and a theatre screen are not implemented. Playing a demo leaves the current
+  level, so save first. Disable the mirror for maximum headset performance.
+- Whole-torso dynamic inflation is suppressed. Localized jiggle assets are not
+  included; static body morph controls remain available.
+- Build succeeded; CPU/ASAN checks cover 52 menus, carry/handoff states, contact
+  transforms, finger lengths/stops, pressure integration and camera math.
+  61 Python launcher/logging/update tests passed for the installed trial.
+  Installed payload verification passed. These are not headset stability tests.
+
+Logging stays local and silent. There is no automatic log upload, game deadline
+or watchdog kill. Closing the PCVR launcher leaves the game running. Quit in-game
+or use Steam Stop when you choose. Setup never launches a game. Native demo
+playback explicitly disables automatic game quit.
+
+All existing credits, licenses and upstream notices are preserved.

@@ -1,6 +1,7 @@
 #pragma once
 #include "handpose.h"
 #include "fingerrange.h"
+#include "fingersurface.h"
 #include <algorithm>
 namespace NativeFingers {
 inline float Amount(float value) {return std::isfinite(value)?std::clamp(value,0.f,1.f):0.f;}
@@ -31,6 +32,21 @@ inline void Chain(const matrix3x4_t* bind,matrix3x4_t* result,const float* curl,
             result[bone]=HandPose::Concat(result[parent],HandPose::RotateJoint(local,localAxis,FingerRange::Angle(finger,segment,FingerRange::Amount(curl[finger],gain),extension)));
             parent=bone;
         }
+    }
+}
+inline void Surface(const matrix3x4_t* bind,matrix3x4_t* result,const float* curls,bool left,float gain,float floor,float extension,const FingerSurface::Shape& shape,float margin) {
+    const int offset=left?0:19,wrist=left?8:27;const int chains[5][3]={{21,22,23},{18,19,20},{15,16,17},{12,13,14},{9,10,11}};
+    const auto palm=-TwoHandAim::Axis(bind[wrist],1);const auto middle=TwoHandAim::Position(bind[15+offset]);
+    for(int f=0;f<5;++f){matrix3x4_t local[3];Vector axes[3];int ids[3];int parent=wrist;
+        for(int j=0;j<3;++j){const int bone=chains[f][j]+offset;ids[j]=bone;
+            const auto direction=TwoHandAim::Position(bind[j<2?bone+1:bone])-TwoHandAim::Position(bind[j<2?bone:parent]);
+            auto toward=palm;if(f==0){toward=middle-TwoHandAim::Position(bind[bone]);TwoHandAim::Unit(toward);toward+=palm*.5f;}
+            const auto axis=CrossProduct(direction,toward);const auto inverse=HandPose::InverseRigid(bind[parent]);
+            axes[j]={TwoHandAim::Dot(TwoHandAim::Axis(bind[parent],0),axis),TwoHandAim::Dot(TwoHandAim::Axis(bind[parent],1),axis),TwoHandAim::Dot(TwoHandAim::Axis(bind[parent],2),axis)};
+            local[j]=HandPose::Concat(inverse,bind[bone]);parent=bone;
+        }
+        const float amount=f?std::max(FingerRange::Amount(curls[f],gain),floor*(f==1?.25f:1.f)):FingerRange::Amount(curls[f],gain);
+        FingerSurface::Clamp(result,wrist,ids,local,axes,f,amount,extension,shape,margin);
     }
 }
 inline void Hands(const matrix3x4_t* bind,matrix3x4_t* result,const float* left,const float* right) {

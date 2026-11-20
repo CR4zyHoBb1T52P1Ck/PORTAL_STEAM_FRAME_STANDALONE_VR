@@ -20,9 +20,11 @@
 #include "handcontact.h"
 #include "propholdinput.h"
 #include "bodysecondary.h"
+#include "bodyresponse.h"
 #include "reticle.h"
 #include "worldpush.h"
 #include "guncontact.h"
+#include "creatorcamera.h"
 #include "triggercolors.h"
 
 #define MAX_STR_LEN 256
@@ -72,7 +74,10 @@ public:
 	uint32_t m_AntiAliasing = 0;
 	uint32_t m_RenderWindow = 0;
 	bool m_NativeModels = false;
-	VrGraphics::Settings m_Graphics;
+    VrGraphics::Settings m_Graphics;
+    CreatorCamera::State m_CreatorCamera;bool m_CreatorRecording=false,m_CreatorReplay=false;
+    std::string m_CreatorTake;
+    void CreatorAction(int action);void CreatorMirror(Vector& origin,QAngle& angles,float& fov);
 	uint32_t m_RecommendedWidth=0,m_RecommendedHeight=0;
 	uint32_t m_UpscaleWidth=0,m_UpscaleHeight=0;
 	bool m_UpscaleReady=false;
@@ -86,7 +91,8 @@ public:
 	uint64_t m_PerfStart=1,m_PerfPrevious=0;
 	double m_PerfElapsedMs=0;
 	std::vector<float> m_PerfIntervals,m_PerfGpu;
-	float m_LastEyeRenderMs=0,m_LastMirrorRenderMs=0,m_LastGpuWaitMs=0;
+	float m_LastEyeRenderMs=0,m_LastMirrorRenderMs=0,m_LastGpuWaitMs=0,m_LastBodyBuildMs=0;
+    unsigned m_LastSecondaryViews=0,m_LastViewDepth=0,m_LastAvatarRebases=0,m_LastAvatarCacheHits=0;
 	FrameStats::Window m_FrameTimingWindow;
 	uint64_t m_FrameTimingPrevious=0,m_FrameTimingStart=0;
 	int m_FrameTimingPhase=-1;
@@ -277,7 +283,7 @@ public:
     vr::VROverlayHandle_t m_ReticleHandle=0;
     int m_ReticleKey=-1;bool m_ReticleReady=false,m_ReticlePending=false;
     uint64_t m_ReticleRetry=0;
-    BodySecondary::Spring m_SecondaryMotion;
+    BodyResponse::State m_SecondaryMotion;
     void UpdateCrosshair();
     matrix3x4_t m_ContactRelative[5]{};bool m_ContactValid[5]{};
     uint64_t m_ContactSnapshot=0,m_ContactResetUntil=0;
@@ -393,7 +399,13 @@ public:
 	QAngle m_ServerGrabAngles = { 0, 0, 0 };
 	void SnapshotGrabPose();
 	bool m_UseCommandHeld = false;
-    PropHold::Input m_PropHold;
+    PropHold::Input m_PropHold;int m_PropCarryMode=0;
+    matrix3x4_t m_PropVisualRelative{},m_PropShapeRelative{},m_PropVisualFromGrab{};Vector m_PropShapeRadii{1,1,1};
+    uint64_t m_PropVisualStamp=0;
+    int PropMode() const{return m_PropHold.hand>=0?m_PropCarryMode:(m_Graphics.autoPalmStowed&&m_Weapon.stowed?1:m_Graphics.propGrabMode);}
+    bool PropThrows() const{return m_Graphics.enhancedThrow||(m_Graphics.autoPalmStowed&&PropMode()==1);}
+    float ForceGain() const{return m_Graphics.sandboxForces?std::clamp(m_Graphics.sandboxForceGain,1.f,10.f):1.f;}
+    float ThrowGain() const{return m_Graphics.sandboxForces?std::clamp(m_Graphics.sandboxThrowGain,1.f,5.f):1.f;}
     bool m_PropInputSupported=false;
     // Either physical controller selects props, independently of carry style.
     bool HandControlledProps() const{return m_PropInputSupported;}

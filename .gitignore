@@ -8,3 +8,7 @@ __pycache__/
 *.private.*
 payload/
 generated/
+
+PCVR-Logs/
+PCVR-Local-Preferences.json
+PCVR-Startup-Error.log

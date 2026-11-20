@@ -2,6 +2,7 @@
 #include "firstpersonbody.h"
 #include "twohandaim.h"
 #include "fingerrange.h"
+#include "fingersurface.h"
 #include "posetwist.h"
 #include <cstring>
 #include <string>
@@ -171,6 +172,11 @@ struct Rig {
                 parent=bone;
             }
         }
+    }
+    void SurfaceFingers(matrix3x4_t* bones,int h,const float* values,float gain,float floor,float extension,const FingerSurface::Shape& shape,float margin) const {
+        if(!values)return;
+        for(int f=0;f<5;++f){const float wanted=f?std::max(FingerRange::Amount(values[f],gain),floor*(f==1?.25f:1.f)):FingerRange::Amount(values[f],gain);
+            FingerSurface::Clamp(bones,arm[h][2],fingers[h][f],fingerLocal[h][f],fingerAxis[h][f],f,wanted,extension,shape,margin);}
     }
     void FitLegs(matrix3x4_t* bones,const matrix3x4_t feet[2],Vector forward,float physicalCrouch,float unit,bool stable) const {
         for(int h=0;h<2;++h) {

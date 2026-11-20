@@ -7,15 +7,28 @@
 #include <iomanip>
 namespace VrMenu {
 using Settings=VrGraphics::Settings;
-enum Page {Home,Arms,LeftArm,RightArm,Gun,Movement,Turning,Comfort,Visuals,Upscaling,Menu,Effects,Support,GripZonePage,SupportHand,Holster,Feedback,Body,GrabPoint,BodyTuning,Calibration,TPose,Measurements,HandFit,BodyShape,HolsterZones,LeftHolster,RightHolster,LocomotionFit,BackGun,Interactions,WorldHands,PropGrab,Throwing,Crosshair,Fingers,Jiggle,PhysicalContact,ImpactTuning,GunCollision,PropPose,PageCount};
+enum Page {Home,Arms,LeftArm,RightArm,Gun,Movement,Turning,Comfort,Visuals,Upscaling,Menu,Effects,Support,GripZonePage,SupportHand,Holster,Feedback,Body,GrabPoint,BodyTuning,Calibration,TPose,Measurements,HandFit,BodyShape,HolsterZones,LeftHolster,RightHolster,LocomotionFit,BackGun,Interactions,WorldHands,PropGrab,Throwing,Crosshair,Fingers,Jiggle,PhysicalContact,ImpactTuning,GunCollision,PropPose,BodyDynamics,PortalPerformance,PressureTuning,PortalTravel,PropRouting,GunSurface,Sandbox,Creator,CreatorCamera,Replay,CreatorMove,PageCount};
 inline const char* Title(Page p) {
     static const char* titles[]={"VR SETTINGS","ARMS AND BODY","LEFT ARM POSITION","RIGHT ARM POSITION","PORTAL GUN","MOVEMENT","TURNING","COMFORT","VISUALS","UPSCALING","MENU AND FEEDBACK","SCREEN EFFECTS","SUPPORT GRIP","GRIP ZONE","SUPPORT HAND","SHOULDER HOLSTER","WEAPON HAPTICS","BODY IK","GUN GRAB POINT","BODY TUNING","CALIBRATION AND FIT","STANDING T-POSE","BODY MEASUREMENTS","HAND ALIGNMENT","BODY SHAPE","HOLSTER ZONES","LEFT HOLSTER","RIGHT HOLSTER","MOVEMENT AND COMFORT","HOLSTERED GUN","WORLD INTERACTIONS","HAND CONTACT","PROP GRAB","THROWING"};
+    if(p==PropRouting)return "GRAB ROUTING AND HANDOFF";if(p==GunSurface)return "GUN FINGER CONTACT";if(p==Sandbox)return "SANDBOX FORCE RANGES";
+    if(p==Creator)return "CREATOR AND REPLAY";if(p==CreatorMove)return "MOVE CREATOR CAMERA";if(p==CreatorCamera)return "SPECTATOR CAMERA";if(p==Replay)return "DEMO REPLAY AND THEATRE";
+    if(p==PressureTuning)return "SUSTAINED HAND AND GUN PUSH";
+    if(p==PortalTravel)return "PORTAL ENTRY AND CLEARANCE";
+    if(p==PortalPerformance)return "PORTAL VIEW PERFORMANCE";
+    if(p==BodyDynamics)return "BODY SHAPE AND JIGGLE";
     if(p==Crosshair)return "CROSSHAIR AND COLORS";if(p==Fingers)return "FINGERS AND GUN POSES";
     if(p==ImpactTuning)return "HAND AND GUN FORCE";if(p==GunCollision)return "GUN COLLISION AND CLEARANCE";if(p==PropPose)return "PALM CARRY AND POSE";
     if(p==Jiggle)return "COSMETIC JIGGLE";if(p==PhysicalContact)return "PHYSICAL CONTACT (BETA)";
     return titles[int(p)];
 }
 inline Page Parent(Page p) {
+    if(p==PropRouting)return PropGrab;if(p==GunSurface)return Fingers;if(p==Sandbox)return PhysicalContact;
+    if(p==CreatorMove)return CreatorCamera;
+    if(p==CreatorCamera||p==Replay)return Creator;
+    if(p==PressureTuning)return PhysicalContact;
+    if(p==PortalTravel)return LocomotionFit;
+    if(p==PortalPerformance)return Visuals;
+    if(p==Jiggle||p==BodyShape)return BodyDynamics;
     if(p==GripZonePage||p==SupportHand||p==Feedback)return Support;
     if(p==Support||p==Holster)return Gun;
     if(p==Body)return Arms;
@@ -37,10 +50,29 @@ struct Option {
 };
 inline const std::vector<Option>& Options() {
     static const std::vector<Option> all={
+        {"CreatorCameraMode","Desktop spectator camera",CreatorCamera,&Settings::creatorCamera,0,3,1,"",{{0,"Head mirror"},{1,"Follow"},{2,"Orbit"},{3,"Free camera"}}},
+        {"CreatorCameraFov","Spectator field of view",CreatorCamera,&Settings::creatorFov,40,110,5," deg"},
+        {"CreatorCameraDistance","Follow / orbit distance",CreatorCamera,&Settings::creatorDistance,.5f,10,.25f," m"},
+        {"CreatorCameraHeight","Follow / orbit height",CreatorCamera,&Settings::creatorHeight,-2,5,.25f," m"},
+        {"CreatorCameraOrbitSpeed","Orbit speed",CreatorCamera,&Settings::creatorOrbit,-60,60,3," deg/s"},
+        {"CreatorCameraStepCM","Free camera movement step",CreatorCamera,&Settings::creatorStepCM,5,200,5," cm"},
+        {"CreatorCameraKeyboard","Focused-window WASD/QE + arrow camera",CreatorCamera,&Settings::creatorKeyboard},
+        {"ReplaySpeed","Playback speed",Replay,&Settings::replaySpeed,.25f,2,.25f,"x"},
+        {"AutoPalmWhenStowed","Stowed gun uses direct palm grab",PropRouting,&Settings::autoPalmStowed},
+        {"PropHandTransfer","Hand-to-hand object transfer",PropRouting,&Settings::propTransfer},
+        {"PropTransferRadiusCM","Hand-off proximity",PropRouting,&Settings::propTransferCM,5,50,1," cm"},
+        {"PropSurfaceHandPose","Bind visible hand to actual held prop",PropPose,&Settings::propSurfacePose},
+        {"PropSurfaceGapCM","Palm surface gap",PropRouting,&Settings::propSurfaceGapCM,0,4,.25f," cm"},
+        {"GunFingerSurface","Stop fingers at gun surface",GunSurface,&Settings::gunSurfacePose},
+        {"GunFingerMarginMM","Finger surface clearance",GunSurface,&Settings::gunFingerMarginMM,0,15,1," mm"},
+        {"GunWorldDepth","Gun uses scene depth for hand visibility",GunSurface,&Settings::gunWorldDepth},
+        {"SandboxForces","Enable extra force multipliers",Sandbox,&Settings::sandboxForces},
+        {"SandboxForceGain","Push / melee multiplier",Sandbox,&Settings::sandboxForceGain,1,10,.5f,"x"},
+        {"SandboxThrowGain","Throw multiplier",Sandbox,&Settings::sandboxThrowGain,1,5,.25f,"x"},
         {"PortalTriggerColorsSwapped","Physical triggers: right / left",Crosshair,&Settings::swapPortalColors,0,1,1,"",{{0,"Blue / orange"},{1,"Orange / blue"}}},
         {"VRCrosshair","World-space crosshair",Crosshair,&Settings::crosshair,0,3,1,"",{{0,"Off"},{1,"Dot"},{2,"Cross"},{3,"Ring"}}},
         {"VRCrosshairColor","Crosshair color",Crosshair,&Settings::crosshairColor,0,4,1,"",{{0,"White"},{1,"Cyan"},{2,"Orange"},{3,"Green"},{4,"Magenta"}}},
-        {"VRCrosshairSizeMM","Crosshair size",Crosshair,&Settings::crosshairMM,2,40,2," mm"},
+        {"VRCrosshairSizeMM","Apparent size at 1 metre",Crosshair,&Settings::crosshairMM,2,40,2," mm"},
         {"VRCrosshairOpacity","Crosshair opacity",Crosshair,&Settings::crosshairOpacity,10,100,5,"%"},
         {"VRCrosshairSurfaceDepth","Follow aim surface depth",Crosshair,&Settings::crosshairDepth},
         {"VRCrosshairDistance","Fallback / fixed distance",Crosshair,&Settings::crosshairDistance,.5f,15,.5f," m"},
@@ -51,12 +83,22 @@ inline const std::vector<Option>& Options() {
         {"GunSurfaceHandPose","Pose fingers around gun",Fingers,&Settings::gunGripPose},
         {"GunHoldingCurl","Holding-hand grip curl",Fingers,&Settings::gunGripCurl,0,100,5,"%"},
         {"GunSupportingCurl","Supporting-hand grip curl",Fingers,&Settings::supportGripCurl,0,100,5,"%"},
-        {"VisualBodyJiggle","Cosmetic jiggle (no world forces)",Jiggle,&Settings::jiggle},
+        {"VisualBodyJiggle","Localized cosmetic jiggle",BodyDynamics,&Settings::jiggle},
+        {"JiggleJumpGain","Jump / vertical body response",Jiggle,&Settings::jiggleJumpGain,0,300,10,"%"},
+        {"JiggleArmSwingGain","Arm swing response",Jiggle,&Settings::jiggleSwingGain,0,200,10,"%"},
+        {"JiggleSelfTouchGain","Hand-to-body touch response",Jiggle,&Settings::jiggleTouchGain,0,300,10,"%"},
+        {"JiggleMaxResponse","Maximum local displacement",Jiggle,&Settings::jiggleMaxResponse,0,40,2,"%"},
+        {"PortalAvatarPoseCache","Reuse identical portal body palettes",PortalPerformance,&Settings::portalPoseCache},
+        {"PortalRenderDepth","Nested portal image depth",PortalPerformance,&Settings::portalRenderDepth,0,3,1,"",{{0,"Keep engine setting"},{1,"1 level (faster)"},{2,"2 levels (native default)"},{3,"3 levels"}}},
         {"JiggleStrength","Motion strength",Jiggle,&Settings::jiggleStrength,0,400,10,"%"},
         {"JiggleFrequency","Spring frequency",Jiggle,&Settings::jiggleHz,2,10,.5f," Hz"},
         {"JiggleDamping","Spring damping",Jiggle,&Settings::jiggleDamping,.2f,2,.1f},
-        {"JiggleChest","Chest influence",Jiggle,&Settings::jiggleChest,0,100,5,"%"},
-        {"JiggleHips","Hip influence",Jiggle,&Settings::jiggleHips,0,100,5,"%"},
+        {"JiggleChest","Breast motion influence",Jiggle,&Settings::jiggleChest,0,100,5,"%"},
+        {"JiggleHips","Glute motion influence",Jiggle,&Settings::jiggleHips,0,100,5,"%"},
+        {"HandPushStiffness","Hand pressure stiffness",PressureTuning,&Settings::handPushStiffness,0,12000,500," N/m"},
+        {"GunPushStiffness","Gun pressure stiffness",PressureTuning,&Settings::gunPushStiffness,0,12000,500," N/m"},
+        {"PressureMaxN","Continuous force safety cap",PressureTuning,&Settings::pressureMaxN,0,800,25," N"},
+        {"PortalHeadHullPercent","Head hull near linked portal",PortalTravel,&Settings::portalHeadClearance,10,100,5,"%"},
         {"HandImpactGain","Hand impact multiplier",ImpactTuning,&Settings::handImpactGain,1,30,1,"x"},
         {"GunImpactGain","Gun impact multiplier",ImpactTuning,&Settings::gunImpactGain,1,30,1,"x"},
         {"ImpactMaxNS","Impact impulse safety cap",ImpactTuning,&Settings::impactMaxNS,10,600,10," Ns"},
@@ -69,8 +111,8 @@ inline const std::vector<Option>& Options() {
         {"PalmCarryOffsetCM","Palm to object center",PropPose,&Settings::palmCarryCM,0,25,1," cm"},
         {"PropShapeHandPose","Approximate held-object hand pose",PropPose,&Settings::propShapePose},
         {"PropPoseCurl","Held-object finger curl",PropPose,&Settings::propPoseCurl,0,100,5,"%"},
-        {"ChestScalePercent","Chest width / depth",BodyShape,&Settings::chestScale,75,200,5,"%"},
-        {"HipScalePercent","Hip width / depth",BodyShape,&Settings::hipScale,75,200,5,"%"},
+        {"ChestScalePercent","Chest width / depth",BodyDynamics,&Settings::chestScale,75,200,5,"%"},
+        {"HipScalePercent","Hip width / depth",BodyDynamics,&Settings::hipScale,75,200,5,"%"},
         {"PhysicalHandPush","Hands push movable objects",PhysicalContact,&Settings::handPush},
         {"PhysicalGunPush","Gun pushes movable objects",PhysicalContact,&Settings::gunPush},
         {"GunWallContact","Gun wall contact / haptics",PhysicalContact,&Settings::gunWallContact},
@@ -112,7 +154,7 @@ inline const std::vector<Option>& Options() {
         {"BackGunPitch","Pitch",BackGun,&Settings::backGunPitch,-180,180,5," deg"},
         {"BackGunYaw","Yaw",BackGun,&Settings::backGunYaw,-180,180,5," deg"},
         {"BackGunRoll","Roll",BackGun,&Settings::backGunRoll,-180,180,5," deg"},
-        {"BodyVolumeEnabled","Body shape controls",BodyShape,&Settings::bodyVolume},
+        {"BodyVolumeEnabled","Body shape controls",BodyDynamics,&Settings::bodyVolume},
         {"WristWidthPercent","Wrist / palm width",BodyShape,&Settings::wristWidth,80,160,2,"%"},
         {"ForearmWidthPercent","Forearm thickness",BodyShape,&Settings::forearmWidth,80,160,2,"%"},
         {"UpperArmWidthPercent","Upper arm thickness",BodyShape,&Settings::upperArmWidth,80,160,2,"%"},
@@ -195,7 +237,7 @@ inline const std::vector<Option>& Options() {
         {"GrabProximityHaptics","Gun proximity haptic",Feedback,&Settings::grabHover},
         {"WeaponHapticDurationMS","Pulse duration",Feedback,&Settings::hapticDurationMS,30,250,10," ms"},
         {"WeaponHapticFrequency","Pulse frequency",Feedback,&Settings::hapticFrequency,80,240,20," Hz"},
-        {"BodyIK","Full native Chell body IK",Body,&Settings::bodyIK},
+        {"BodyIK","Full native Chell body IK",BodyDynamics,&Settings::bodyIK},
         {"BodyIKArmScale","Body arm reach scale",BodyTuning,&Settings::bodyArmScale,.8f,1.5f,.05f,"x"},
         {"BodyIKInfluence","Body IK influence",BodyTuning,&Settings::bodyIKInfluence,0,1,.1f},
         {"BodyIKAutoReach","Reach controller exactly",BodyTuning,&Settings::bodyAutoReach},
@@ -229,7 +271,7 @@ inline const std::vector<Option>& Options() {
         {"DynamicShadows","Dynamic shadows",Visuals,&Settings::shadows},
         {"RenderWindow","Desktop mirror scene",Visuals,&Settings::mirror},
         {"ShowFPS","FPS display",Visuals,&Settings::showFps},
-        {"FrameTimingLog","Frame timing log",Visuals,&Settings::frameTimingLog},
+        {"FrameTimingLog","Frame and secondary-view log",PortalPerformance,&Settings::frameTimingLog},
         {"SpatialUpscaler","Spatial upscaling",Upscaling,&Settings::upscaler,0,3,1,"",{{0,"Off"},{1,"SGSR fast"},{2,"SGSR edge quality"},{3,"Bilinear reference"}}},
         {"UpscaleOutputWidth","Upscaled image width",Upscaling,&Settings::upscaleWidth,1728,3200,128," px",{{1728,"1728 px"},{2016,"2016 px"},{2304,"2304 px"},{2560,"2560 px"},{2912,"2912 px"},{3200,"3200 px"}},true},
         {"UpscaleSharpness","Upscale sharpness",Upscaling,&Settings::upscaleSharpness,1,2,.1f},
@@ -287,7 +329,7 @@ template<class Map> inline void Load(Settings& s,const Map& input) {
 }
 inline std::vector<int> On(Page page) {std::vector<int> rows;for(int i=0;i<int(Options().size());++i)if(Options()[i].page==page)rows.push_back(i);return rows;}
 inline void ApplyPreset(Settings& s,int preset) {
-    const int widths[]={2016,1728,1536,2016},samples[]={4,2,2,2},modes[]={0,2,1,2},outputs[]={2016,2016,2016,2560};
-    const int i=std::clamp(preset,0,3);s.eyeWidth=widths[i];s.msaa=samples[i];s.upscaler=modes[i];s.upscaleWidth=outputs[i];
+    const int widths[]={2016,1728,1536,2016,2016},samples[]={4,2,2,2,2},modes[]={0,2,1,2,0},outputs[]={2016,2016,2016,2560,2016};
+    const int i=std::clamp(preset,0,4);s.eyeWidth=widths[i];s.msaa=samples[i];s.upscaler=modes[i];s.upscaleWidth=outputs[i];
 }
 }

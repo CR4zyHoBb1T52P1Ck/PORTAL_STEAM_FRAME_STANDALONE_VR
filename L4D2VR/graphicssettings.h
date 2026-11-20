@@ -7,16 +7,26 @@
 namespace VrGraphics {
 constexpr int Width=1200,Height=1060,Top=194,RowHeight=58,Rows=12;
 struct Settings {
+    int creatorCamera=0;float creatorFov=75,creatorDistance=2,creatorHeight=.5f,creatorOrbit=12,creatorStepCM=25,replaySpeed=1;
+    bool creatorKeyboard=false;
+    bool autoPalmStowed=true,propTransfer=true,propSurfacePose=true,gunSurfacePose=true,gunWorldDepth=true;
+    float propTransferCM=22,gunFingerMarginMM=4,propSurfaceGapCM=1;
+    bool sandboxForces=false;float sandboxForceGain=1,sandboxThrowGain=1;
     bool swapPortalColors=false,gunGripPose=true,handPush=false,gunPush=false,gunWallContact=false,jiggle=false;
     int crosshair=0,crosshairColor=0,thumbPose=0;
     bool crosshairDepth=true;
     float crosshairMM=10,crosshairOpacity=90,crosshairDistance=3;
     float thumbGain=100,thumbStraighten=0,thumbExtension=0,gunGripCurl=65,supportGripCurl=55;
     float pushGain=1,pushMaxImpulse=20,pushRadiusCM=4,pushHz=30,gunContactRadiusCM=7;
+    float handPushStiffness=3500,gunPushStiffness=4500,pressureMaxN=300;
+    float portalHeadClearance=35;
     float handImpactGain=6,gunImpactGain=6,impactMaxNS=160,impactCooldownMS=100;
     float gunWallRadiusCM=4,gunWallLimitCM=90,gunWallRelease=100;
     bool portalContactBypass=true,palmSnap=true,propShapePose=true;
     float palmCarryCM=7,propPoseCurl=65,chestScale=100,hipScale=100;
+    bool portalPoseCache=true;
+    int portalRenderDepth=0;
+    float jiggleJumpGain=100,jiggleSwingGain=20,jiggleTouchGain=100,jiggleMaxResponse=20;
     float jiggleStrength=30,jiggleHz=4,jiggleDamping=.8f,jiggleChest=100,jiggleHips=50;
     int scale=100,msaa=2,texture=0,filter=8,upscaler=0;
     bool blur=false,bloom=true,shadows=true,mirror=false,showFps=false;
@@ -47,7 +57,7 @@ struct Settings {
     float leftX=0,leftY=0,leftZ=0,leftPitch=0,leftYaw=0,leftRoll=0;
     float rightX=0,rightY=0,rightZ=0,rightPitch=0,rightYaw=0,rightRoll=0;
     float gunX=0,gunY=0,gunZ=0,gunPitch=0,gunYaw=0,gunRoll=0;
-    float grabXCM=0,grabYCM=0,grabZCM=0,fingerRange=150,wristTwist=50;
+    float grabXCM=-2,grabYCM=-3,grabZCM=-3.5f,fingerRange=150,wristTwist=50;
     bool portalGunPose=true;
     bool bodyFit=false,controllerHands=false,bodyVolume=true,holsterReachTest=false;
     bool bodyUpright=true,backGun=true;
@@ -100,7 +110,8 @@ inline std::string Commands(const Settings& s) {
     return "mat_motion_blur_enabled "+std::to_string(s.legacyEffects&&s.blur)
         +";mat_disable_bloom "+std::to_string(!s.bloom)
         +";r_shadows "+std::to_string(s.shadows)+";r_shadowrendertotexture "+std::to_string(s.shadows)
-        +";cl_showfps "+std::to_string(s.showFps);
+        +";cl_showfps "+std::to_string(s.showFps)
+        +(s.portalRenderDepth>0?";r_portal_stencil_depth "+std::to_string(std::clamp(s.portalRenderDepth,1,3)):"");
 }
 inline int Hit(int x,int y) {
     if(x<30 || x>=Width-30 || y<Top || y>=Top+Rows*RowHeight) return -1;

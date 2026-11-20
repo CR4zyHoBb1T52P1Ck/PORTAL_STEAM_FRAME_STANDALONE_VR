@@ -2,17 +2,26 @@
 #include "graphicsmenupaint.h"
 #include "vrmenuoptions.h"
 namespace VrMenu {
-enum Action {None,OpenPage,Edit,ResetPage,Back,Recenter,Resume,Benchmark,ResetPlacement,Restart,Preset,TestHaptic,ResetGunGrip,SetGrabPoint,ResetGrabPoint,StartTPose,ApplyTPose,CancelTPose,ApplyManualFit,ResetBodyFit,ResetHandFit,OriginalBodyShape,SetHolster,SetStandingHeight};
+enum Action {None,OpenPage,Edit,ResetPage,Back,Recenter,Resume,Benchmark,ResetPlacement,Restart,Preset,TestHaptic,ResetGunGrip,SetGrabPoint,ResetGrabPoint,StartTPose,ApplyTPose,CancelTPose,ApplyManualFit,ResetBodyFit,ResetHandFit,OriginalBodyShape,SetHolster,SetStandingHeight,CreatorCommand};
 struct Row {std::string label,value;Action action=None;int target=-1;};
 inline std::vector<Row> Rows(const Settings& s,Page page) {
     std::vector<Row> rows;
     if(page==Home) {
-        for(const auto& item:std::vector<std::pair<const char*,Page>>{{"Calibration, tuning and comfort",Calibration},{"Arms and body",Arms},{"World interactions (beta)",Interactions},{"Gun placement and holster",Gun},{"Movement, turning and comfort",LocomotionFit},{"Crosshair and trigger colors",Crosshair},{"Cosmetic jiggle",Jiggle},{"Visuals",Visuals},{"Upscaling",Upscaling},{"Menu placement and feedback",Menu},{"Screen effects",Effects}})
+        for(const auto& item:std::vector<std::pair<const char*,Page>>{{"Calibration, tuning and comfort",Calibration},{"Arms and body",Arms},{"World interactions (beta)",Interactions},{"Gun placement and holster",Gun},{"Movement, turning and comfort",LocomotionFit},{"Crosshair and trigger colors",Crosshair},{"Body shape and jiggle",BodyDynamics},{"Visuals",Visuals},{"Upscaling",Upscaling},{"Menu placement and feedback",Menu},{"Creator, cameras and replay",Creator}})
             rows.push_back({item.first,"Open  >",OpenPage,item.second});
         rows.push_back({"Resume game","Close all menus",Resume});
     } else {
+        if(page==Creator){rows.push_back({"Screen effects","Open  >",OpenPage,Effects});rows.push_back({"Spectator / free camera","Open  >",OpenPage,CreatorCamera});rows.push_back({"Native demo recording / theatre","Open  >",OpenPage,Replay});}
+        if(page==CreatorCamera){rows.push_back({"Move / turn free camera","Open  >",OpenPage,CreatorMove});rows.push_back({"Reset camera at headset","Reset",CreatorCommand,20});}
+        if(page==CreatorMove){
+            const char* labels[]={"Forward","Backward","Left","Right","Up","Down","Turn left","Turn right","Look up","Look down"};
+            for(int i=0;i<10;++i)rows.push_back({labels[i],"Step",CreatorCommand,30+i});
+        }
+        if(page==Replay){
+            for(auto item:std::vector<std::pair<const char*,int>>{{"Start a new demo recording",0},{"Stop recording (game keeps running)",1},{"Play latest take (leaves current level)",2},{"Pause replay",3},{"Resume replay",4},{"Apply playback speed",5},{"Open native demo timeline",6},{"Exit demo playback",7}})rows.push_back({item.first,"Select",CreatorCommand,item.second});
+        }
         if(page==Calibration) {
-            for(const auto& item:std::vector<std::pair<const char*,Page>>{{"Standing T-pose setup",TPose},{"Body measurements / manual setup",Measurements},{"Hand alignment",HandFit},{"Body shape and thickness",BodyShape},{"Body and wrist tuning",BodyTuning},{"Portal gun grab point",GrabPoint},{"Shoulder holster zones",HolsterZones},{"Movement, turning and comfort",LocomotionFit}})rows.push_back({item.first,"Open  >",OpenPage,item.second});
+            for(const auto& item:std::vector<std::pair<const char*,Page>>{{"Standing T-pose setup",TPose},{"Body measurements / manual setup",Measurements},{"Hand alignment",HandFit},{"Chest, hips, shape and jiggle",BodyDynamics},{"Body and wrist tuning",BodyTuning},{"Portal gun grab point",GrabPoint},{"Shoulder holster zones",HolsterZones},{"Movement, turning and comfort",LocomotionFit}})rows.push_back({item.first,"Open  >",OpenPage,item.second});
             rows.push_back({"Recenter headset and panels","Recenter",Recenter});rows.push_back({"Back",Title(Home),Back});return rows;
         }
         if(page==TPose) {
@@ -23,9 +32,14 @@ inline std::vector<Row> Rows(const Settings& s,Page page) {
             rows.push_back({"Reset body calibration","Use native body",ResetBodyFit});
         }
         if(page==Interactions)for(auto p:{WorldHands,PropGrab,Throwing,PhysicalContact})rows.push_back({Title(p),"Open  >",OpenPage,p});
+        if(page==Fingers)rows.push_back({"Gun surface and visibility","Open  >",OpenPage,GunSurface});
+        if(page==PhysicalContact)rows.push_back({"Extra sandbox force ranges","Open  >",OpenPage,Sandbox});
+        if(page==PropGrab)rows.push_back({"Gun stowed / handoff routing","Open  >",OpenPage,PropRouting});
         if(page==Arms)rows.push_back({"Finger, thumb and gun poses","Open  >",OpenPage,Fingers});
-        if(page==LocomotionFit)for(auto p:{Movement,Turning,Comfort})rows.push_back({Title(p),"Open  >",OpenPage,p});
+        if(page==LocomotionFit)for(auto p:{Movement,Turning,Comfort,PortalTravel})rows.push_back({Title(p),"Open  >",OpenPage,p});
         for(int i:On(page)) {const auto& o=Options()[i];rows.push_back({o.name,Value(s,o),Edit,i});}
+        if(page==BodyDynamics){rows.push_back({"Jiggle movement and touch tuning","Open  >",OpenPage,Jiggle});rows.push_back({"Arms, wrists and torso shape","Open  >",OpenPage,BodyShape});}
+        if(page==BodyShape||page==Body)rows.push_back({"Chest, hips and jiggle","Open  >",OpenPage,BodyDynamics});
         if(page==Arms)rows.push_back({"Native body and IK","Open  >",OpenPage,Body});
         if(page==Arms)rows.push_back({"Hand alignment and wrist placement","Open  >",OpenPage,HandFit});
         if(page==HandFit){rows.push_back({"Left wrist placement","Open  >",OpenPage,LeftArm});rows.push_back({"Right wrist placement","Open  >",OpenPage,RightArm});rows.push_back({"Align hands to controller grips","Reset wrist offsets",ResetHandFit});}
@@ -42,16 +56,19 @@ inline std::vector<Row> Rows(const Settings& s,Page page) {
         if(page==Feedback){rows.push_back({"Test left controller haptic","Pulse",TestHaptic,0});rows.push_back({"Test right controller haptic","Pulse",TestHaptic,1});}
         if(page==Gun){rows.push_back({"Portal gun grab point","Open  >",OpenPage,GrabPoint});rows.push_back({"Support grip and aiming","Open  >",OpenPage,Support});rows.push_back({"Shoulder holster","Open  >",OpenPage,Holster});}
         if(page==Support){rows.push_back({"Grip zone size and position","Open  >",OpenPage,GripZonePage});rows.push_back({"Supporting hand placement","Open  >",OpenPage,SupportHand});rows.push_back({"Weapon haptics","Open  >",OpenPage,Feedback});}
-        if(page==PhysicalContact){rows.push_back({"Hand / gun force controls","Open  >",OpenPage,ImpactTuning});rows.push_back({"Gun wall clearance controls","Open  >",OpenPage,GunCollision});}
+        if(page==Visuals)rows.push_back({"Portal-view performance","Open  >",OpenPage,PortalPerformance});
+        if(page==PortalPerformance){rows.push_back({"Native resolution, lighter MSAA","2016 / 2x / native",Preset,4});rows.push_back({"Balanced upscaling preset","1728 / 2x / 2016 edge",Preset,1});}
+        if(page==PhysicalContact){rows.push_back({"Sustained pressure controls","Open  >",OpenPage,PressureTuning});rows.push_back({"Hand / gun force controls","Open  >",OpenPage,ImpactTuning});rows.push_back({"Gun wall clearance controls","Open  >",OpenPage,GunCollision});}
         if(page==PropGrab)rows.push_back({"Palm carry and object hand pose","Open  >",OpenPage,PropPose});
         if(page==Upscaling){
             rows.push_back({"Native clarity preset","2016 / 4x / native",Preset,0});
             rows.push_back({"Balanced upscale preset","1728 / 2x / 2016 edge",Preset,1});
             rows.push_back({"Performance upscale preset","1536 / 2x / 2016 fast",Preset,2});
             rows.push_back({"High output preset","2016 / 2x / 2560 edge",Preset,3});
+            rows.push_back({"Portal-heavy native preset","2016 / 2x / native",Preset,4});
         }
         if(page==Upscaling)rows.push_back({"Record 30-second comparison","Arm sample",Benchmark});
-        if(page==Visuals||page==Upscaling||page==Effects)rows.push_back({"Restart Portal with new settings","Save settings + relaunch",Restart});
+        if(page==Visuals||page==Upscaling||page==Effects||page==PortalPerformance)rows.push_back({"Restart Portal with new settings","Save settings + relaunch",Restart});
         if(page==Comfort)rows.push_back({"Recenter headset","Recenter",Recenter});
         if(page==Menu)rows.push_back({"Reset menu placement","Bring panel in front",ResetPlacement});
         if(!On(page).empty())rows.push_back({"Reset this page","Restore defaults",ResetPage,int(page)});
@@ -91,7 +108,7 @@ inline std::vector<uint32_t> Paint(const Settings& s,Page page,int selected,cons
     fill({0,0,Width,Height},RGB(16,22,30),28);
     HFONT font=CreateFontA(-27,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,ANSI_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH,"Segoe UI");auto oldFont=SelectObject(dc,font);
     auto text=[&](int x,int y,const std::string& value,COLORREF color=RGB(235,240,246)){SetTextColor(dc,color);TextOutA(dc,x,y,value.c_str(),int(value.size()));};
-    text(60,25,std::string("PORTAL FRAME  /  ")+Title(page),RGB(82,200,255));text(1130,25,"X",RGB(255,200,120));
+    text(60,25,std::string("PORTAL FRAME  /  ")+Title(page)+"  [Interaction-26]",RGB(82,200,255));text(1130,25,"X",RGB(255,200,120));
     text(40,75,active);text(40,118,pipeline.empty()?"Grip + drag: move   |   Grip + stick: depth   |   Grip + D-pad: slide":pipeline);
     text(40,155,"Both stick clicks: bring settings here. VIEW: escape. Corners: resize.",RGB(166,189,210));
     const auto rows=Rows(s,page);

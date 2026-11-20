@@ -18,6 +18,7 @@
 #include "firstpersonbody.h"
 #include "cameracollision.h"
 #include "portalpose.h"
+#include "viewwork.h"
 #include "portalcamera.h"
 #include "pickuptrace.h"
 #include "nativepose.h"
@@ -25,6 +26,9 @@
 #include "nativefingers.h"
 #include "studiomaterial.h"
 #include "bodyik.h"
+#include "softskin.h"
+#include "fingersurface.h"
+#include "../dxvk/src/d3d9/d3d9_vr.h"
 #include "nativephysics.h"
 #include "propinteraction.h"
 #include "avatarpalette.h"
@@ -80,6 +84,7 @@ static bool s_LocalWorldGunReady=false;
 static void *s_LocalPlayerEntity = nullptr;
 static void *s_LocalPlayerRenderable = nullptr;
 static bool s_DrawingLocalPlayerBodyDirect = false;
+static thread_local bool s_CreatorMirrorPass=false;
 static bool s_ActiveFirstPersonBodyPass = false;
 static bool s_InlineBodyDrawEligible = false;
 static bool s_BodyDrawTriggered = false;
@@ -90,6 +95,7 @@ static Vector s_LocalPlayerBodyDrawOffset = {0, 0, 0};
 static struct { Vector origin, angles; float zNear, fov; } s_BodyExpectedView{};
 static Vector s_BodyCameraCenter = {0, 0, 0};
 static std::vector<bool> s_BodyViewStack;
+static ViewWork::Frame s_ViewWork;
 
 static void ExpectBodyView(const CViewSetup &view)
 {
@@ -250,18 +256,21 @@ namespace
     };
     thread_local PropReleaseVelocity s_ReleaseVelocity;
     static double PropTime();
-    WorldPush::Sweep s_PushSweeps[5];WorldPush::Cooldown s_PushCooldown;uint64_t s_NextPush=0;
+    WorldPush::Sweep s_PushSweeps[5];WorldPush::Cooldown s_PushCooldown;uint64_t s_NextPush=0;double s_LastPressure=0;
     void UpdatePhysicalContact(void* player) {
         auto* vr=Hooks::m_VR;auto* game=Hooks::m_Game;const auto now=GetTickCount64();
         if(!vr||!game||game->GetLocalPlayerIndex()<=0||ServerEntityIndex(player)!=game->GetLocalPlayerIndex())return;
         if(!vr->InteractionAllowed()||(!vr->m_Graphics.handPush&&!vr->m_Graphics.gunPush)||now<vr->m_ContactResetUntil
             ||now-vr->m_ContactSnapshot>120||vr->PortalContactClearance()) {
-            for(auto& sweep:s_PushSweeps)sweep={};return;
+            for(auto& sweep:s_PushSweeps)sweep={};s_LastPressure=0;return;
         }
         if(now<s_NextPush)return;s_NextPush=now+uint64_t(1000/std::clamp(vr->m_Graphics.pushHz,15.f,60.f));
         auto* trace=game->GetServerEngineTrace();Vector eye;const auto* actual=Hooks::hkEyePosition.fOriginal(player,&eye);
         if(!trace||!actual)return;eye=*actual;const auto angles=Hooks::hkEyeAngles.fOriginal(player);
         const auto time=PropTime();const auto& g=vr->m_Graphics;
+        const float pressureDT=s_LastPressure?float(time-s_LastPressure):0;s_LastPressure=time;
+        struct Contact{void* entity=nullptr;Vector pressure{0,0,0},impact{0,0,0},pressurePoint{0,0,0},impactPoint{0,0,0};int source=0;bool recovered=false;};
+        Contact contacts[5];int contactCount=0;
         for(int i=0;i<5;++i) {
             if(!vr->m_ContactValid[i]||(i<2?!g.handPush:!g.gunPush)){s_PushSweeps[i]={};continue;}
             const auto pose=PortalPose::WorldHand(vr->m_ContactRelative[i],eye,angles);const auto end=PortalPose::Position(pose);
@@ -270,9 +279,6 @@ namespace
             // Remove player locomotion from contact velocity. Portal/funneling
             // momentum cannot become a simulated hand/gun impulse.
             if(!s_PushSweeps[i].Sample(end-eye,time,vr->m_VRScale,previous,velocity))continue;
-            // No impulse can pass the normal-speed gate below this magnitude.
-            // Avoid five sweeps/visibility queries for stationary controllers.
-            if(velocity.LengthSqr()<vr->m_VRScale*vr->m_VRScale*.0144f)continue;
             const auto start=eye+previous;CTraceFilterSkipEntity filter(reinterpret_cast<IHandleEntity*>(player),0);
             const float radius=(i<2?g.pushRadiusCM:g.gunContactRadiusCM)*vr->m_VRScale/100;
             Ray_t ray;ray.Init(start,end,{-radius,-radius,-radius},{radius,radius,radius});CGameTrace hit{};hit.fraction=1;
@@ -281,7 +287,8 @@ namespace
             if(hit.startsolid||hit.allsolid) {
                 // Recover the front surface after a fast hand enters a prop.
                 // A wall in the way remains the first hit and is rejected.
-                Ray_t recovery;recovery.Init(eye,end);hit={};hit.fraction=1;
+                auto direction=end-eye;if(!TwoHandAim::Unit(direction))continue;
+                Ray_t recovery;recovery.Init(eye,end+direction*radius);hit={};hit.fraction=1;
                 trace->TraceRay(recovery,0x0601400b,&filter,&hit);entity=hit.m_pEnt;recovered=true;
             }
             if(!entity||entity==player||ServerEntityIndex(entity)<=0||hit.fraction>=1||hit.startsolid||hit.allsolid)continue;
@@ -291,14 +298,27 @@ namespace
             Ray_t sight;sight.Init(eye,hit.endpos);CGameTrace visible{};visible.fraction=1;
             trace->TraceRay(sight,0x0601400b,&filter,&visible);
             if(visible.startsolid||visible.allsolid||(visible.fraction<.98f&&visible.m_pEnt!=entity))continue;
-            const auto impulse=WorldPush::Impulse(velocity,hit.plane.normal,vr->m_VRScale,g.pushGain*(i<2?g.handImpactGain:g.gunImpactGain),g.impactMaxNS,i>=2);
-            if(impulse.LengthSqr()<.0001f||!s_PushCooldown.Accept(entity,time,g.impactCooldownMS/1000))continue;
-            if(NativePhysics::Push(NativePhysics::Physics(entity),impulse,hit.endpos-hit.plane.normal*(recovered?0:radius))) {
-                vr->WeaponHaptic(i<2?i:vr->WeaponHand(),.65f,g.contactHaptics);
-                static uint64_t nextAudit=0;if(now>=nextAudit){nextAudit=now+500;PortalVrLog("Physical contact source=%d entity=%p impulseNs=%f recovered=%d",i,entity,sqrtf(impulse.LengthSqr())/vr->m_VRScale,recovered);}
-            }
+            const auto point=hit.endpos-hit.plane.normal*(recovered?0:radius);
+            const auto pressure=WorldPush::Pressure(end,point,hit.plane.normal,velocity,radius,vr->m_VRScale,
+                (i<2?g.handPushStiffness:g.gunPushStiffness)*vr->ForceGain(),std::min(4000.f,g.pressureMaxN*vr->ForceGain()),pressureDT);
+            const auto impulse=WorldPush::Impulse(velocity,hit.plane.normal,vr->m_VRScale,g.pushGain*(i<2?g.handImpactGain:g.gunImpactGain)*vr->ForceGain(),std::min(1200.f,g.impactMaxNS*vr->ForceGain()),i>=2);
+            int n=0;for(;n<contactCount&&contacts[n].entity!=entity;++n){}if(n==contactCount)++contactCount;
+            auto& c=contacts[n];c.entity=entity;c.source=i;c.recovered=recovered;
+            // Multiple gun probes must not multiply force on the same prop.
+            if(pressure.LengthSqr()>c.pressure.LengthSqr()){c.pressure=pressure;c.pressurePoint=point;}
+            if(impulse.LengthSqr()>c.impact.LengthSqr()){c.impact=impulse;c.impactPoint=point;}
+        }
+        for(int n=0;n<contactCount;++n){const auto& c=contacts[n];
+            const bool pressure=NativePhysics::Push(NativePhysics::Physics(c.entity),c.pressure,c.pressurePoint);
+            const bool impact=c.impact.LengthSqr()>.0001f&&s_PushCooldown.Accept(c.entity,time,g.impactCooldownMS/1000)
+                &&NativePhysics::Push(NativePhysics::Physics(c.entity),c.impact,c.impactPoint);
+            if(impact)vr->WeaponHaptic(c.source<2?c.source:vr->WeaponHand(),.65f,g.contactHaptics);
+            static uint64_t nextAudit=0;if((pressure||impact)&&now>=nextAudit){nextAudit=now+500;
+                PortalVrLog("Physical contact source=%d entity=%p impulseNs=%f pressureN=%f dt=%f recovered=%d",c.source,c.entity,
+                    impact?sqrtf(c.impact.LengthSqr())/vr->m_VRScale:0,pressure&&pressureDT>0?sqrtf(c.pressure.LengthSqr())/(vr->m_VRScale*pressureDT):0,pressureDT,c.recovered);}
         }
     }
+
     void ApplyPropReleaseVelocity() {
         const auto pending=s_ReleaseVelocity;s_ReleaseVelocity={};
         if(!pending.ready||s_PropBinding.Entity(pending.handle)!=pending.entity)return;
@@ -313,9 +333,19 @@ namespace
         if(!s_PropPlayer||!Hooks::m_VR->InteractionAllowed()||!ServerHandPose(s_PropPlayer,p,a))return false;
         pose=PortalPose::Frame(p,a);return PropInteraction::Valid(pose);
     }
+    bool PropSurface(void* player,void* entity,const matrix3x4_t& hand,const matrix3x4_t& object,Vector& contact) {
+        auto* trace=Hooks::m_Game->GetServerEngineTrace();if(!trace||!player||!entity)return false;
+        CTraceFilterSkipEntity filter(reinterpret_cast<IHandleEntity*>(player),0);
+        Vector eye;const auto* actual=Hooks::hkEyePosition.fOriginal(player,&eye);if(!actual)return false;
+        for(const auto start:{PortalPose::Position(hand),*actual}){
+            Ray_t ray;ray.Init(start,PortalPose::Position(object));CGameTrace hit{};hit.fraction=1;
+            trace->TraceRay(ray,0x0601400b,&filter,&hit);
+            if(hit.m_pEnt==entity&&!hit.startsolid&&!hit.allsolid&&hit.fraction<1&&TwoHandAim::Finite(hit.endpos)){contact=hit.endpos;return true;}
+        }return false;
+    }
     void __fastcall SetPropTargetHook(void* controller,void*,const Vector& position,const QAngle& angles) {
         auto* vr=Hooks::m_VR;
-        if(controller==s_PropUpdate&&vr&&vr->m_Graphics.propGrabMode==1&&vr->InteractionAllowed()) {
+        if(controller==s_PropUpdate&&vr&&vr->PropMode()==1&&vr->InteractionAllowed()) {
             // Native portal carry has a separate transformed target. Preserve
             // it while the object is on the other side of a linked portal.
             const auto portalFlag=reinterpret_cast<uintptr_t>(controller)+0x12c1;
@@ -334,7 +364,7 @@ namespace
         unsigned handle=0xffffffff;
         Vector linear{0,0,0},angular{0,0,0};matrix3x4_t object,hand;
         const auto now=GetTickCount64();
-        bool apply=s_GripRelease&&vr&&vr->m_PropHold.throwRelease&&vr->m_Graphics.enhancedThrow&&vr->m_ThrowReleaseUntil&&now<=vr->m_ThrowReleaseUntil
+        bool apply=s_GripRelease&&vr&&vr->m_PropHold.throwRelease&&vr->PropThrows()&&vr->m_ThrowReleaseUntil&&now<=vr->m_ThrowReleaseUntil
             &&vr->InteractionAllowed()&&entity&&controller==s_PropCarry.controller&&entity==s_PropCarry.entity
             &&vr->PropHand()==s_PropCarry.hand&&PropHandPose(hand);
         if(apply) {
@@ -348,7 +378,7 @@ namespace
         s_DetachProp.fOriginal(controller,clearVelocity);
         if(apply&&s_PropBinding.Entity(handle)==entity) {
             linear=PropInteraction::CenterVelocity(linear,angular,PortalPose::Position(hand),PortalPose::Position(object));
-            linear=PropInteraction::Limit(linear*vr->m_Graphics.throwGain,vr->m_VRScale*vr->m_Graphics.throwMaxMPS);
+            linear=PropInteraction::Limit(linear*(vr->m_Graphics.throwGain*vr->ThrowGain()),vr->m_VRScale*std::min(40.f,vr->m_Graphics.throwMaxMPS*vr->ThrowGain()));
             angular=PropInteraction::Limit(angular*(vr->m_Graphics.throwSpin/100),1440);
             const Vector local{TwoHandAim::Dot(angular,TwoHandAim::Axis(object,0)),TwoHandAim::Dot(angular,TwoHandAim::Axis(object,1)),TwoHandAim::Dot(angular,TwoHandAim::Axis(object,2))};
             // Defer until PickupController::Shutdown has also completed its
@@ -563,9 +593,13 @@ namespace
 	bool BuildFirstPersonBodyBones(void *state, const matrix3x4_t *source,
 		matrix3x4_t *result, const ModelRenderInfo_t &)
 	{
+        struct BodyTimer {
+            std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
+            ~BodyTimer(){s_ViewWork.bodyMs+=std::chrono::duration<float,std::milli>(std::chrono::steady_clock::now()-start).count();}
+        } timer;
 		StudioBodyView view;
 		if (!source || !result || !GetStudioBodyView(state, view)
-			|| !TranslateFirstPersonBodyBones(state, source, result))
+			|| !SigScanner::IsReadable(reinterpret_cast<uintptr_t>(source),view.count*sizeof(matrix3x4_t)))
 			return false;
 
         if(Hooks::m_VR->m_Graphics.bodyIK) {
@@ -612,15 +646,31 @@ namespace
                     if(!rig.SolveNative(posed,headTarget,hands,Hooks::m_VR->m_HmdForward,fittedReach,settings.bodyIKInfluence,
                         settings.bodyAutoReach,(settings.fingerTracking||settings.gunGripPose||settings.thumbPose||settings.thumbExtension>0)?curls:nullptr,gripping,&headPose,settings.fingerRange/100,settings.wristTwist/100,palm,handScale,wristScale,settings.palmDepth/100,fitted&&settings.rigidTorso,gripFloors,std::max(settings.thumbExtension,settings.thumbPose?70.f:0.f)/100))return false;
                     if(settings.bodyVolume)rig.Volume(posed,settings.upperArmWidth/100,settings.forearmWidth/100,settings.wristWidth/100,settings.handSize/100,settings.torsoWidth/100,settings.wristCuff/100);
-                    float secondary=0;
-                    if(settings.jiggle) {
-                        // The previous response was under a percent at normal
-                        // walking acceleration. Amplify the bounded spring in
-                        // skin space, with no change to any controller target.
-                        secondary=std::clamp(Hooks::m_VR->m_SecondaryMotion.Step(Hooks::m_VR->m_SetupOrigin+Hooks::m_VR->m_HmdPosRelative,PropTime(),Hooks::m_VR->m_VRScale,settings.jiggleHz,settings.jiggleDamping,1)*12*(settings.jiggleStrength/100),-.15f,.15f);
+                    if(settings.gunSurfacePose&&!Hooks::m_VR->m_Weapon.stowed&&Hooks::m_VR->m_PortalAimLastSeen){
+                        FingerSurface::Shape shape;shape.gun=true;shape.frame=HandPose::Concat(Hooks::m_VR->GetGunControllerFrame(),Hooks::m_VR->m_GunFromController);
+                        for(int h=0;h<2;++h)if(gripping[h])rig.SurfaceFingers(posed,h,curls[h],settings.fingerRange/100,gripFloors[h],std::max(settings.thumbExtension,settings.thumbPose?70.f:0.f)/100,shape,settings.gunFingerMarginMM*Hooks::m_VR->m_VRScale/1000);
+                    }
+                    if(settings.propSurfacePose&&Hooks::m_VR->m_PropHold.attached&&Hooks::m_VR->PropMode()==1&&GetTickCount64()-Hooks::m_VR->m_PropVisualStamp<120){
+                        FingerSurface::Shape shape;shape.frame=HandPose::Concat(PortalPose::Frame(Hooks::m_VR->m_GrabControllerPos,Hooks::m_VR->m_GrabControllerAng),Hooks::m_VR->m_PropShapeRelative);shape.radii=Hooks::m_VR->m_PropShapeRadii;
+                        const int h=(Hooks::m_VR->PropHand()==0)!=Hooks::m_VR->m_LeftHanded?0:1;
+                        rig.SurfaceFingers(posed,h,curls[h],settings.fingerRange/100,(settings.propShapePose?settings.propPoseCurl/100:0),settings.thumbExtension/100,shape,Hooks::m_VR->m_VRScale*.003f);
+                    }
+                    BodyResponse::Output secondary;
+                    // Cosmetic skin motion stays visible while tuning the VR
+                    // menu. World interaction and game simulation stay paused.
+                    if(settings.jiggle&&Hooks::m_VR->m_SystemFocus.Allowed()&&Hooks::m_VR->m_HmdPose.isValid) {
+                        const Vector trackedHands[2]={TwoHandAim::Position(Hooks::m_VR->GetPhysicalHandFrame(true)),TwoHandAim::Position(Hooks::m_VR->GetPhysicalHandFrame(false))};
+                        const bool tracked[2]={Hooks::m_VR->m_ActionStateFresh&&(Hooks::m_VR->m_LeftHanded?Hooks::m_VR->m_RightControllerPose.isValid:Hooks::m_VR->m_LeftControllerPose.isValid),
+                                               Hooks::m_VR->m_ActionStateFresh&&(Hooks::m_VR->m_LeftHanded?Hooks::m_VR->m_LeftControllerPose.isValid:Hooks::m_VR->m_RightControllerPose.isValid)};
+                        secondary=Hooks::m_VR->m_SecondaryMotion.Step(s_BodyCameraCenter,trackedHands,tracked,TwoHandAim::Position(posed[rig.chest]),TwoHandAim::Position(posed[rig.hips]),
+                            Hooks::m_VR->m_HmdForward,PropTime(),Hooks::m_VR->m_VRScale,settings.jiggleHz,settings.jiggleDamping,settings.jiggleStrength/100,
+                            settings.jiggleJumpGain/100,settings.jiggleSwingGain/100,settings.jiggleTouchGain/100,settings.jiggleMaxResponse/100,
+                            settings.bodyVolume?settings.chestScale/100:1,settings.bodyVolume?settings.hipScale/100:1);
+                        if(secondary.touches)PortalVrLog("Cosmetic body touch mask=%u chest=%f hips=%f",secondary.touches,secondary.chest,secondary.hips);
                     }else Hooks::m_VR->m_SecondaryMotion.Reset();
-                    rig.TorsoVolume(posed,(settings.bodyVolume?settings.chestScale/100:1)*(1+secondary*settings.jiggleChest/100),
-                        (settings.bodyVolume?settings.hipScale/100:1)*(1-secondary*settings.jiggleHips/100));
+                    rig.TorsoVolume(posed,settings.bodyVolume?settings.chestScale/100:1,settings.bodyVolume?settings.hipScale/100:1);
+                    if(SoftSkin::Marked(header,length))SoftSkin::Apply(rig,posed,
+                        secondary.breast*(Hooks::m_VR->m_VRScale*settings.jiggleChest/100),secondary.glute*(Hooks::m_VR->m_VRScale*settings.jiggleHips/100));
                     s_AvatarPalette.Store(s_AvatarFrame,header,native[0],posed,view.count);
                     static unsigned audits=0;
                     if((audits++%600)==0)PortalVrLog("Whole-body pose serial=%llu bones=%d leftWristError=%f rightWristError=%f autoReach=%d influence=%f",s_AvatarFrame,view.count,
@@ -632,10 +682,10 @@ namespace
                     }
                 }
                 if(!s_AvatarPalette.Current(s_AvatarFrame,header))return false;
-                s_AvatarPalette.Copy(result,source[0],s_DrawingLocalPlayerBodyDirect);
+                s_AvatarPalette.Copy(result,source[0],s_DrawingLocalPlayerBodyDirect,settings.portalPoseCache);
                 // First-person-only visibility. Portal copies retain the entire
                 // same solved Chell, including native wrists, fingers and head.
-                if(s_DrawingLocalPlayerBodyDirect) {
+                if(s_DrawingLocalPlayerBodyDirect&&!s_CreatorMirrorPass) {
                     int roots[3],n=0;if(Hooks::m_VR->m_FirstPersonBodyHideUpper)roots[n++]=rig.neck;
                     const bool primaryLeft=(Hooks::m_VR->WeaponHand()==0)!=Hooks::m_VR->m_LeftHanded;
                     for(int h=0;h<2;++h) {
@@ -653,12 +703,16 @@ namespace
                         const auto point=HandPose::Frame({0,0,0},{0,0,0},{0,0,0},wrist);
                         for(int i=0;i<rig.count;++i)if(rig.below[rig.arm[h][0]][i]&&!rig.below[rig.arm[h][2]][i])result[i]=point;
                     }
+                    // Aliased render slots are below native head/arm branches;
+                    // keep localized torso skin after first-person hiding.
+                    if(SoftSkin::Marked(header,length)){result[65]=s_AvatarPalette.posed[65];result[66]=s_AvatarPalette.posed[66];}
                     s_NativeAvatarDirectDrawn=true;
                 }
                 return true;
             }
         }
 
+        if(!TranslateFirstPersonBodyBones(state,source,result))return false;
 		int parents[FirstPersonBody::MaxBones]{};
 		for (int i = 0; i < view.count; ++i)
 		{
@@ -1097,7 +1151,9 @@ void __fastcall Hooks::dPush3DView(void *ecx, void *edx, const CViewSetup &view,
         if(logged++<6)PortalVrLog("Eye world target native=%s actual=%s size=%dx%d view=%dx%d direct=%d",name?name:"null",target?target->GetName():"null",target?target->GetActualWidth():0,target?target->GetActualHeight():0,view.width,view.height,!m_VR->m_ActiveLegacyEffects);
     }
     hkPush3DView.fOriginal(ecx, view, flags, target, frustum);
-    s_BodyViewStack.push_back(IsBodyWorldView(view, target, nullptr));
+    const bool primary=IsBodyWorldView(view,target,nullptr);
+    if(m_ActiveEyeTexture)s_ViewWork.View(primary,unsigned(s_BodyViewStack.size()+1));
+    s_BodyViewStack.push_back(primary);
 }
 
 void __fastcall Hooks::dPush3DViewDepth(void *ecx, void *edx, const CViewSetup &view, int flags, ITexture *target, void *frustum, ITexture *depth)
@@ -1118,7 +1174,9 @@ void __fastcall Hooks::dPush3DViewDepth(void *ecx, void *edx, const CViewSetup &
             sqrtf((view.origin-corrected.origin).LengthSqr()),sqrtf((view.angles-corrected.angles).LengthSqr()));
     }
     hkPush3DViewDepth.fOriginal(ecx, corrected, flags, target, frustum, depth);
-    s_BodyViewStack.push_back(IsBodyWorldView(corrected, target, depth));
+    const bool primary=IsBodyWorldView(corrected,target,depth);
+    if(m_ActiveEyeTexture)s_ViewWork.View(primary,unsigned(s_BodyViewStack.size()+1));
+    s_BodyViewStack.push_back(primary);
 }
 
 void __fastcall Hooks::dRenderView(void *ecx, void *edx, CViewSetup &originalSetup, int nClearFlags, int whatToDraw)
@@ -1216,6 +1274,7 @@ void __fastcall Hooks::dRenderView(void *ecx, void *edx, CViewSetup &originalSet
 	CViewSetup leftEyeView = setup;
 	CViewSetup rightEyeView = setup;
 	const auto eyeRenderStart=std::chrono::steady_clock::now();
+    s_ViewWork={};
 
 	// Left eye CViewSetup
 	leftEyeView.origin = portalCamera.Map(m_VR->GetViewOriginLeft(position));
@@ -1318,6 +1377,9 @@ void __fastcall Hooks::dRenderView(void *ecx, void *edx, CViewSetup &originalSet
 	rndrContext->Release();
 	m_VR->m_LastEyeRenderMs=std::chrono::duration<float,std::milli>(std::chrono::steady_clock::now()-eyeRenderStart).count();
 	m_VR->m_LastMirrorRenderMs=0;
+    m_VR->m_LastSecondaryViews=s_ViewWork.secondary;m_VR->m_LastViewDepth=s_ViewWork.maxDepth;m_VR->m_LastBodyBuildMs=s_ViewWork.bodyMs;
+    const bool paletteCurrent=s_AvatarPalette.valid&&s_AvatarPalette.serial==s_AvatarFrame;
+    m_VR->m_LastAvatarRebases=paletteCurrent?s_AvatarPalette.rebaseComputes:0;m_VR->m_LastAvatarCacheHits=paletteCurrent?s_AvatarPalette.rebaseHits:0;
 
 	/*rndrContext = matSystem->GetRenderContext();
 
@@ -1341,9 +1403,13 @@ void __fastcall Hooks::dRenderView(void *ecx, void *edx, CViewSetup &originalSet
 		s_BodyDrawTriggered = false;
 		s_InlineBodyDrawEligible = true;
 		s_ActiveFirstPersonBodyPass = true;
+		QAngle creatorAngle(desktopView.angles.x,desktopView.angles.y,desktopView.angles.z);
+        m_VR->CreatorMirror(desktopView.origin,creatorAngle,desktopView.fov);desktopView.angles={creatorAngle.x,creatorAngle.y,creatorAngle.z};
+        s_CreatorMirrorPass=m_VR->m_Graphics.creatorCamera!=0;
 		ExpectBodyView(desktopView);
 		s_BodyCameraCenter = position;
 		hkRenderView.fOriginal(ecx, desktopView, nClearFlags, whatToDraw);
+        s_CreatorMirrorPass=false;
 		s_ActiveFirstPersonBodyPass = false;
 		s_InlineBodyDrawEligible = false;
 		m_VR->m_LastMirrorRenderMs=std::chrono::duration<float,std::milli>(std::chrono::steady_clock::now()-mirrorStart).count();
@@ -1364,6 +1430,10 @@ bool __fastcall Hooks::dCreateMove(void *ecx, void *edx, float flInputSampleTime
     const bool originalResult = hkCreateMove.fOriginal(ecx, flInputSampleTime, cmd);
     if (!m_VR->m_IsVREnabled)
         return originalResult;
+    DWORD foregroundPid=0;GetWindowThreadProcessId(GetForegroundWindow(),&foregroundPid);
+    if(m_VR->m_Graphics.creatorCamera==3&&m_VR->m_Graphics.creatorKeyboard&&foregroundPid==GetCurrentProcessId()){
+        cmd->forwardmove=cmd->sidemove=cmd->upmove=0;cmd->buttons&=~(IN_ATTACK|IN_ATTACK2|IN_USE|IN_JUMP|IN_DUCK|IN_FORWARD|IN_BACK|IN_MOVELEFT|IN_MOVERIGHT);return originalResult;
+    }
 	if(!m_VR->m_SystemFocus.Allowed() || m_VR->m_GraphicsOpen || m_Game->IsCursorVisible()) {
 		cmd->forwardmove=cmd->sidemove=cmd->upmove=0;
 		cmd->buttons&=~(IN_ATTACK|IN_ATTACK2|IN_USE|IN_JUMP|IN_DUCK|IN_RELOAD|IN_FORWARD|IN_BACK|IN_MOVELEFT|IN_MOVERIGHT);
@@ -1721,6 +1791,20 @@ void Hooks::dDrawModelExecute(void *ecx, void *edx, void *state, const ModelRend
 	// Work on a copy: Source shares its cached matrices with attachments and
 	// other eyes. Rewriting that cache would accumulate the controller transform.
     const auto *bones = static_cast<const matrix3x4_t *>(pCustomBoneToWorld);
+    // Neutral repair also covers IK off, nonlocal Chell and alternate passes.
+    // All changes are to a private draw palette, never Source's bone cache.
+    matrix3x4_t neutralSkin[BodyIK::Max];StudioBodyView softView;
+    static BodyIK::Rig softRig;static const unsigned char* softHeader=nullptr;static bool softValid=false;
+    if(bones&&GetStudioBodyView(state,softView)&&SoftSkin::Marked(softView.header,softView.modelLength)
+        &&SigScanner::IsReadable(reinterpret_cast<uintptr_t>(bones),softView.count*sizeof(matrix3x4_t))) {
+        if(softHeader!=softView.header){softHeader=softView.header;softValid=SigScanner::IsReadable(reinterpret_cast<uintptr_t>(softView.header),softView.modelLength)&&softRig.Read(softView.header,softView.modelLength);}
+        if(softValid){memcpy(neutralSkin,bones,softView.count*sizeof(matrix3x4_t));SoftSkin::Apply(softRig,neutralSkin);bones=neutralSkin;pCustomBoneToWorld=neutralSkin;}
+    }
+    struct DepthGuard{bool changed=false;~DepthGuard(){if(changed&&g_D3DVR9)g_D3DVR9->WorldModelDepth(FALSE);}} depthGuard;
+    if(m_VR->m_Graphics.gunWorldDepth&&g_D3DVR9&&info.pModel&&m_Game->GetModelInfo()){
+        const auto* name=m_Game->GetModelInfo()->GetModelName(info.pModel);
+        if(name&&strstr(name,"weapons/v_portalgun"))depthGuard.changed=g_D3DVR9->WorldModelDepth(TRUE)==S_OK;
+    }
 	const bool localPlayerBody = IsLocalPlayerBody(info);
     if(m_VR->m_IsVREnabled&&info.pModel&&m_Game->GetModelInfo()) {
         const auto* path=m_Game->GetModelInfo()->GetModelName(info.pModel);
@@ -1948,6 +2032,10 @@ void Hooks::dDrawModelExecute(void *ecx, void *edx, void *state, const ModelRend
                         const auto& pose=m_VR->m_Graphics;const float extension=std::max(pose.thumbExtension,pose.thumbPose?70.f:0.f)/100;
                         NativeFingers::TrackedHand(reference,tracked,leftCurl,true,!m_VR->m_Weapon.stowed&&(primaryPhysicalLeft||supporting),m_VR->m_Graphics.fingerRange/100,pose.gunGripPose?(primaryPhysicalLeft?pose.gunGripCurl:pose.supportGripCurl)/100:0,extension);
                         NativeFingers::TrackedHand(reference,tracked,rightCurl,false,!m_VR->m_Weapon.stowed&&(!primaryPhysicalLeft||supporting),m_VR->m_Graphics.fingerRange/100,pose.gunGripPose?(!primaryPhysicalLeft?pose.gunGripCurl:pose.supportGripCurl)/100:0,extension);
+                        if(pose.gunSurfacePose&&!m_VR->m_Weapon.stowed&&m_VR->m_PortalAimLastSeen){FingerSurface::Shape shape;shape.gun=true;shape.frame=HandPose::Concat(m_VR->GetGunControllerFrame(),m_VR->m_GunFromController);
+                            if(primaryPhysicalLeft||supporting)NativeFingers::Surface(reference,tracked,leftCurl,true,pose.fingerRange/100,(pose.gunGripPose?(primaryPhysicalLeft?pose.gunGripCurl:pose.supportGripCurl)/100:0),extension,shape,pose.gunFingerMarginMM*m_VR->m_VRScale/1000);
+                            if(!primaryPhysicalLeft||supporting)NativeFingers::Surface(reference,tracked,rightCurl,false,pose.fingerRange/100,(pose.gunGripPose?(!primaryPhysicalLeft?pose.gunGripCurl:pose.supportGripCurl)/100:0),extension,shape,pose.gunFingerMarginMM*m_VR->m_VRScale/1000);
+                        }
                     }
                     else if(!m_VR->m_NativeModels)HandPose::ApplyFingerCurl(reference, tracked,
                         supporting ? supportCurl : m_VR->m_LeftFingerCurl, m_VR->m_RightFingerCurl);
@@ -2303,7 +2391,7 @@ void* __fastcall Hooks::dFindUseEntity(void* ecx, void* edx)
 				sqrtf((serverDirection-visibleDirection).LengthSqr()));
 		}
 	}
-    if(entity&&m_VR->m_Graphics.propGrabMode==1&&s_PropBinding.getAttached) {
+    if(entity&&m_VR->PropMode()==1&&s_PropBinding.getAttached) {
         matrix3x4_t object;Vector hand;QAngle angles;
         if(NativePhysics::Position(NativePhysics::Physics(entity),object)&&ServerHandPose(ecx,hand,angles)
             &&(PortalPose::Position(object)-hand).LengthSqr()>powf(m_VR->m_Graphics.handGrabReachCM*m_VR->m_VRScale/100,2))entity=nullptr;
@@ -2550,8 +2638,25 @@ bool __fastcall Hooks::dUpdateObject(void* ecx, void* edx, void* pPlayer, float 
         if(entity&&s_PropBinding.PickupOwner(ecx,pPlayer)){s_PropController=ecx;m_VR->m_PropHold.Attach();}
         if(entity&&PropHandPose(hand)&&NativePhysics::Position(NativePhysics::Physics(entity),object)) {
             static unsigned observations=0;
-            if(s_PropCarry.controller!=ecx&&observations++<32)PortalVrLog("Native prop carry controller=%p entity=%p mode=%d hand=%d initialGapCM=%f",ecx,entity,m_VR->m_Graphics.propGrabMode,m_VR->PropHand(),sqrtf((PortalPose::Position(object)-PortalPose::Position(hand)).LengthSqr())/m_VR->m_VRScale*100);
-            s_PropCarry.Target(ecx,entity,m_VR->m_Graphics.propGrabMode,m_VR->PropHand(),PropTime(),hand,object,m_VR->m_VRScale,m_VR->m_Graphics.propGrabMode==1&&m_VR->m_Graphics.palmSnap?m_VR->m_Graphics.palmCarryCM*m_VR->m_VRScale/100:-1);
+            if(s_PropCarry.controller!=ecx&&observations++<32)PortalVrLog("Native prop carry controller=%p entity=%p mode=%d hand=%d initialGapCM=%f",ecx,entity,m_VR->PropMode(),m_VR->PropHand(),sqrtf((PortalPose::Position(object)-PortalPose::Position(hand)).LengthSqr())/m_VR->m_VRScale*100);
+            const bool fresh=s_PropCarry.New(ecx,entity,m_VR->PropMode(),m_VR->PropHand());
+            s_PropCarry.Target(ecx,entity,m_VR->PropMode(),m_VR->PropHand(),PropTime(),hand,object,m_VR->m_VRScale,-1);
+            if(fresh&&m_VR->PropMode()==1&&m_VR->m_Graphics.palmSnap){Vector contact;
+                if(PropSurface(pPlayer,entity,hand,object,contact)){
+                    s_PropCarry.Surface(contact,hand,object,m_VR->m_Graphics.propSurfaceGapCM*m_VR->m_VRScale/100);
+                    const float radius=std::clamp(sqrtf((contact-PortalPose::Position(object)).LengthSqr()),m_VR->m_VRScale*.02f,m_VR->m_VRScale*.5f);
+                    m_VR->m_PropShapeRadii={radius,radius,radius};
+                    PortalVrLog("Palm surface captured hand=%d radiusCM=%f",m_VR->PropHand(),radius*100/m_VR->m_VRScale);
+                }
+            }
+            const auto portalFlag=reinterpret_cast<uintptr_t>(ecx)+0x12c1;
+            const bool across=SigScanner::IsReadable(portalFlag,1)&&*reinterpret_cast<unsigned char*>(portalFlag);
+            if(s_PropCarry.surface&&m_VR->PropMode()==1&&!across&&!m_VR->PortalContactClearance()){
+                const auto visual=HandPose::Concat(HandPose::Concat(object,s_PropCarry.palmFromObject),m_VR->m_PropVisualFromGrab);
+                m_VR->m_PropVisualRelative=HandPose::Concat(HandPose::InverseRigid(hand),visual);
+                m_VR->m_PropShapeRelative=HandPose::Concat(HandPose::InverseRigid(hand),object);
+                m_VR->m_PropVisualStamp=GetTickCount64();
+            }else m_VR->m_PropVisualStamp=0;
         } else s_PropCarry.Reset();
     } else if(s_PropCarry.controller==ecx)s_PropCarry.Reset();
     const bool value = hkUpdateObject.fOriginal(ecx, pPlayer, flError);

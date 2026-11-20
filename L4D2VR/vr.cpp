@@ -887,7 +887,7 @@ void VR::UpdateWeaponHandling() {
     if(event!=WeaponHandling::None) {
         m_ContactResetUntil=GetTickCount64()+250;m_GunWallRetraction=0;
         m_ThrowReleaseUntil=0;
-        m_Game->ClientCmd_Unrestricted("-attack;-attack2;-use");m_UseCommandHeld=false;m_GrabPoseValid=m_PickupAimValid=false;
+        m_Game->ClientCmd_Unrestricted(m_PropHold.attached?"-attack;-attack2":"-attack;-attack2;-use");if(!m_PropHold.attached)m_UseCommandHeld=false;m_GrabPoseValid=m_PickupAimValid=false;
         PortalVrLog("Weapon interaction event=%d hand=%d stowed=%d",int(event),m_Weapon.hand,m_Weapon.stowed);
     }
     bool trigger[2]{};
@@ -906,7 +906,13 @@ void VR::UpdatePropInput() {
     bool eligible[2]{};
     for(int h=0;h<2;++h)eligible[h]=!m_UseGripBlocked[h]&&!m_Weapon.blocked[h]
         &&!(m_Graphics.holster&&m_ShoulderHover[h])&&!m_OptionalSupportActive;
-    m_PropHold.Step(HandControlledProps()&&InteractionAllowed()&&GetTickCount64()>=m_HandSwitchSuppressUntil,m_GripPressed,tracked,eligible);
+    const int previousHand=m_PropHold.hand;
+    const int nextMode=m_Graphics.autoPalmStowed&&m_Weapon.stowed?1:m_Graphics.propGrabMode;
+    const bool handoffNearby=m_Graphics.propTransfer&&tracked[0]&&tracked[1]&&m_PropHold.attached
+        &&(GetLeftHandAbsPos()-GetRightHandAbsPos()).LengthSqr()<=powf(m_Graphics.propTransferCM*m_VRScale/100,2);
+    m_PropHold.Step(HandControlledProps()&&InteractionAllowed()&&(m_PropHold.attached||GetTickCount64()>=m_HandSwitchSuppressUntil),m_GripPressed,tracked,eligible,handoffNearby);
+    if(previousHand<0&&m_PropHold.hand>=0)m_PropCarryMode=nextMode;
+    if(previousHand>=0&&m_PropHold.hand>=0&&previousHand!=m_PropHold.hand){m_PropVisualStamp=0;WeaponHaptic(m_PropHold.hand,.5f,m_Graphics.grabHaptics);}
     if(m_PropHold.release)m_ThrowReleaseUntil=m_PropHold.throwRelease?GetTickCount64()+300:0;
 }
 
@@ -1377,12 +1383,13 @@ void VR::SnapshotGrabPose()
 {
     const bool controlled=HandControlledProps(),left=PropHand()==0;
     m_GrabPoseValid = controlled?PropHandTracked():WeaponTracked();
-    m_GrabControllerPos = controlled?(left?GetLeftHandAbsPos():GetRightHandAbsPos()):WeaponPosition();
+    m_GrabControllerPos = controlled?TwoHandAim::Position(GetPhysicalHandFrame(left!=m_LeftHanded)):WeaponPosition();
     // Carry forward from the visible wrist in the same aim orientation as the
     // gun. The uncorrected grip direction is 30 degrees higher on this binding.
     m_GrabControllerAng = PickupTrace::CarryAngles(controlled?(left?m_LeftControllerForward:m_RightControllerForward):WeaponForward(),controlled?(left?m_LeftControllerUp:m_RightControllerUp):WeaponUp());
     m_GrabHandRelative = PortalPose::RelativeHand(
         m_GrabControllerPos - m_SetupOrigin, m_GrabControllerAng, m_HmdAngAbs);
+    if(controlled)m_PropVisualFromGrab=HandPose::Concat(HandPose::InverseRigid(PortalPose::Frame(m_GrabControllerPos,m_GrabControllerAng)),GetPhysicalHandFrame(left!=m_LeftHanded));
     if(controlled){m_PickupAimValid=m_GrabPoseValid;m_PickupAimRelative=m_GrabHandRelative;return;}
     // Selection follows the visible gun's centerline. Carry physics continues
     // to use the wrist snapshot above, so acquiring a prop does not move it.
@@ -1664,7 +1671,10 @@ void VR::UpdateCameraCollision(Vector setupOrigin)
     }
 
     const Vector desired = GetViewOrigin(setupOrigin);
-    const float radius = CameraCollision::HullRadius(m_Ipd * m_IpdScale * m_VRScale, m_Fov, m_Aspect);
+    static const PortalTrace::Binding portalTrace = PortalTrace::Binding::Resolve(m_Game->m_BaseClient);
+    const bool atPortal=portalTrace.Environment(player)!=nullptr;
+    const float radius = CameraCollision::HullRadius(m_Ipd * m_IpdScale * m_VRScale, m_Fov, m_Aspect)
+        *(atPortal?std::clamp(m_Graphics.portalHeadClearance/100,.1f,1.f):1.f);
     const Vector extent(radius, radius, radius);
     Ray_t ray{};
     ray.Init(setupOrigin, desired, extent * -1.0f, extent);
@@ -1673,7 +1683,6 @@ void VR::UpdateCameraCollision(Vector setupOrigin)
     trace.startsolid = trace.allsolid = false;
     CTraceFilterSkipEntity filter(reinterpret_cast<IHandleEntity*>(player), 0);
     constexpr unsigned mask = CONTENTS_SOLID | CONTENTS_WINDOW | CONTENTS_GRATE | CONTENTS_MOVEABLE;
-    static const PortalTrace::Binding portalTrace = PortalTrace::Binding::Resolve(m_Game->m_BaseClient);
     static bool loggedBinding = false;
     if (!loggedBinding) {
         PortalVrLog("Portal-aware head collision available=%d", portalTrace.function != nullptr);

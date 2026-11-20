@@ -247,6 +247,7 @@ void VR::ChangeGraphicsSetting(int row,int direction) {
     case VrMenu::TestHaptic:
         ControllerHaptic(selected.target,m_Graphics.grabHapticStrength,m_Graphics.hapticDurationMS/1000,m_Graphics.hapticFrequency,"user-test");
         m_GraphicsStatus="Haptic requested. Binding and result saved silently.";break;
+    case VrMenu::CreatorCommand:CreatorAction(selected.target);break;
     case VrMenu::Resume:CloseVrMenus(true);return;
     case VrMenu::Restart:RequestPortalRestart();return;
     case VrMenu::Recenter:ResetPosition();SetMenuPlacement();m_GraphicsStatus="Headset and menu recentered.";break;
@@ -258,6 +259,7 @@ void VR::ChangeGraphicsSetting(int row,int direction) {
             VrMenu::ApplyPreset(m_Graphics,selected.target);
         } else if(selected.action==VrMenu::Edit)VrMenu::Change(m_Graphics,VrMenu::Options()[selected.target],direction);
         else {const VrGraphics::Settings defaults;for(int i:VrMenu::On(m_MenuPage))VrMenu::Set(m_Graphics,VrMenu::Options()[i],VrMenu::Get(defaults,VrMenu::Options()[i]));}
+        if(m_Graphics.creatorCamera>0&&m_Graphics.creatorCamera!=previous.creatorCamera)m_Graphics.mirror=true;
         if(SaveGraphicsSettings()) {
             m_GraphicsApplyPending=true;
             const bool restart=selected.action==VrMenu::Preset||(selected.action==VrMenu::Edit&&VrMenu::Options()[selected.target].restart);
@@ -281,7 +283,8 @@ vr::EVROverlayError VR::UploadOverlayFile(vr::VROverlayHandle_t handle,const std
     return SUCCEEDED(result)?vr::VROverlayError_None:vr::VROverlayError_RequestFailed;
 }
 void VR::OverlayTextureSubmitted(vr::VROverlayHandle_t handle,vr::EVROverlayError result) {
-    if(handle==m_ReticleHandle){m_ReticleReady=result==vr::VROverlayError_None;m_ReticlePending=false;return;}
+    if(handle==m_ReticleHandle){m_ReticleReady=result==vr::VROverlayError_None;m_ReticlePending=false;
+        PortalVrLog("Aim reticle GPU ready=%d error=%d",m_ReticleReady,result);return;}
     if(result!=vr::VROverlayError_None) {
         PortalVrLog("GPU overlay submission handle=%llu error=%d",handle,result);
         if(handle==m_GraphicsStagingHandle&&m_MenuRaster.pending){m_MenuRaster.Failed(GetTickCount64());m_GraphicsDirty=true;}
@@ -351,6 +354,8 @@ void VR::UpdateGraphicsMenu() {
         else if(m_MenuPage==VrMenu::Crosshair)output="Trigger colors stay on the same physical controller across gun handoffs.";
         else if(m_MenuPage==VrMenu::Fingers)output="Gun grip is a curl floor; tracked fingers can curl further. Thumb pose is optional.";
         else if(m_MenuPage==VrMenu::Jiggle)output="Small damped visual body response only. Bone positions and movement stay fixed.";
+        else if(m_MenuPage==VrMenu::Creator||m_MenuPage==VrMenu::CreatorCamera)output="Spectator camera renders an extra desktop view; headset tracking stays unchanged.";
+        else if(m_MenuPage==VrMenu::Replay)output="Native demos replay the world. Injected VR hand/body poses are not recorded in demos yet.";
         else if(m_MenuPage==VrMenu::PhysicalContact)output="Controller swings push movable props. Native player/portal travel is not driven.";
         else if(m_MenuPage==VrMenu::TPose)output="Stand upright, arms sideways. Release triggers; hold BOTH for 1 second.";
         else if(m_MenuPage==VrMenu::Measurements)output="Head + hands measure reach/drop. Shoulder width is an adjustable estimate.";
@@ -494,6 +499,9 @@ matrix3x4_t VR::GetAvatarHandFrame(bool physicalLeft,bool contact) {
     }
     if(g.gunWallContact&&!m_Weapon.stowed&&((physicalLeft==primaryLeft&&(g.controllerHands||!g.gripHand))||(physicalLeft!=primaryLeft&&m_OptionalSupportActive&&!g.snapSupportHand)))
         for(int r=0;r<3;++r)result[r][3]-=m_GunWallDirection[r]*m_GunWallRetraction;
+    if(contact&&m_Graphics.propSurfacePose&&m_PropHold.attached&&PropMode()==1
+        &&(physicalLeft!=m_LeftHanded)==(PropHand()==0)&&GetTickCount64()-m_PropVisualStamp<120&&InteractionAllowed()&&!PortalContactClearance())
+        return HandPose::Concat(PortalPose::Frame(m_GrabControllerPos,m_GrabControllerAng),m_PropVisualRelative);
     const auto& touch=m_HandContact[physicalLeft?0:1];
     if(contact&&g.handContact&&touch.valid&&touch.touching&&GetTickCount64()-touch.time<150&&InteractionAllowed())return touch.frame;
     return result;
@@ -598,8 +606,12 @@ void VR::UpdateCrosshair() {
     auto pose=m_Poses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking;
     for(int r=0;r<3;++r)pose.m[r][3]+=pose.m[r][0]*relative.x+pose.m[r][1]*relative.y+pose.m[r][2]*relative.z;
     m_Overlay->SetOverlayTransformAbsolute(m_ReticleHandle,vr::VRCompositor()->GetTrackingSpace(),&pose);
-    m_Overlay->SetOverlayWidthInMeters(m_ReticleHandle,g.crosshairMM/1000);
+    const float width=Reticle::Width(g.crosshair,g.crosshairMM,sqrtf(delta.LengthSqr())/m_VRScale);
+    m_Overlay->SetOverlayWidthInMeters(m_ReticleHandle,width);
+    static uint64_t nextReticleAudit=0;if(now>=nextReticleAudit){nextReticleAudit=now+10000;
+        PortalVrLog("Aim reticle shape=%d ready=%d pending=%d distanceM=%f widthM=%f",g.crosshair,m_ReticleReady,m_ReticlePending,sqrtf(delta.LengthSqr())/m_VRScale,width);}
     if(m_ReticleReady)m_Overlay->ShowOverlay(m_ReticleHandle);
 }
+#include "vrcreator_impl.h"
 #include "vrcalibration_impl.h"
 #include "vrmenuinteraction_impl.h"

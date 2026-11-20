@@ -43,8 +43,16 @@ struct Motion {
     }
 };
 struct Carry {
-    void* controller=nullptr;void* entity=nullptr;int mode=-1,hand=-1;matrix3x4_t relative{};Motion motion;
-    void Reset(){controller=entity=nullptr;mode=hand=-1;motion.Reset();}
+    void* controller=nullptr;void* entity=nullptr;int mode=-1,hand=-1;matrix3x4_t relative{},palmFromObject{};bool surface=false;Motion motion;
+    void Reset(){controller=entity=nullptr;mode=hand=-1;surface=false;motion.Reset();}
+    bool New(void* c,void* e,int m,int h)const{return c!=controller||e!=entity||m!=mode||h!=hand;}
+    void Surface(Vector worldContact,const matrix3x4_t& handPose,const matrix3x4_t& object,float gap) {
+        if(!TwoHandAim::Finite(worldContact)||!Valid(handPose)||!Valid(object))return;
+        const auto cp=HandPose::Concat(HandPose::InverseRigid(handPose),HandPose::Frame({1,0,0},{0,1,0},{0,0,1},worldContact));
+        const auto delta=PortalPose::Position(cp);for(int r=0;r<3;++r)relative[r][3]-=delta[r];
+        auto normal=PortalPose::Position(relative);if(TwoHandAim::Unit(normal))for(int r=0;r<3;++r)relative[r][3]+=normal[r]*std::clamp(gap,0.f,2.f);
+        const auto target=HandPose::Concat(handPose,relative);palmFromObject=HandPose::Concat(HandPose::InverseRigid(target),handPose);surface=true;
+    }
     matrix3x4_t Target(void* c,void* e,int m,int h,double now,const matrix3x4_t& handPose,const matrix3x4_t& object,float units,float palmDistance=-1) {
         if(c!=controller||e!=entity||m!=mode||h!=hand){Reset();controller=c;entity=e;mode=m;hand=h;relative=HandPose::Concat(HandPose::InverseRigid(handPose),object);
             if(std::isfinite(palmDistance)&&palmDistance>=0){

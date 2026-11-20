@@ -253,7 +253,7 @@ index 9713399..5bf2310 100644
  	return result;
    }
 diff --git a/src/d3d9/d3d9_vr.cpp b/src/d3d9/d3d9_vr.cpp
-index 8ed15b0..a273d0a 100644
+index 8ed15b0..1a14bdf 100644
 --- a/src/d3d9/d3d9_vr.cpp
 +++ b/src/d3d9/d3d9_vr.cpp
 @@ -9,6 +9,10 @@
@@ -306,7 +306,7 @@ index 8ed15b0..a273d0a 100644
  
              return D3D_OK;
          }
-@@ -122,27 +122,160 @@ namespace dxvk {
+@@ -122,27 +122,171 @@ namespace dxvk {
  
          HRESULT STDMETHODCALLTYPE GetBackBufferData(SharedTextureHolder* backBufferData)
          {
@@ -452,7 +452,18 @@ index 8ed15b0..a273d0a 100644
 +            return D3D_OK;
          }
  
++        HRESULT STDMETHODCALLTYPE WorldModelDepth(BOOL enabled) {
++            if(enabled){
++                if(m_worldDepth)return D3DERR_INVALIDCALL;
++                if(FAILED(m_device->GetViewport(&m_savedViewport)))return E_FAIL;
++                if(m_savedViewport.MinZ!=0.f||m_savedViewport.MaxZ>.25f)return S_FALSE;
++                auto viewport=m_savedViewport;viewport.MinZ=0;viewport.MaxZ=1;
++                const auto hr=m_device->SetViewport(&viewport);m_worldDepth=SUCCEEDED(hr);return hr;
++            }
++            if(!m_worldDepth)return S_FALSE;m_worldDepth=false;return m_device->SetViewport(&m_savedViewport);
++        }
      private:
++        D3DVIEWPORT9 m_savedViewport{};bool m_worldDepth=false;
 +        struct OverlayImage {
 +            IDirect3DTexture9* texture=nullptr;IDirect3DSurface9* surface=nullptr;
 +            uint32_t width=0,height=0;bool dirty=false;SharedTextureHolder shared;
@@ -481,7 +492,7 @@ index 8ed15b0..a273d0a 100644
          D3D9DeviceEx *m_device;
          D3D9DeviceLock m_lock;
      };
-@@ -156,4 +289,4 @@ HRESULT __stdcall Direct3DCreateVRImpl(IDirect3DDevice9 *pDevice, IDirect3DVR9 *
+@@ -156,4 +300,4 @@ HRESULT __stdcall Direct3DCreateVRImpl(IDirect3DDevice9 *pDevice, IDirect3DVR9 *
      *pInterface = new dxvk::D3D9VR(pDevice);
  
      return D3D_OK;
@@ -489,10 +500,10 @@ index 8ed15b0..a273d0a 100644
 \ No newline at end of file
 +}
 diff --git a/src/d3d9/d3d9_vr.h b/src/d3d9/d3d9_vr.h
-index b906cf7..bf5afcb 100644
+index b906cf7..e47468f 100644
 --- a/src/d3d9/d3d9_vr.h
 +++ b/src/d3d9/d3d9_vr.h
-@@ -33,6 +33,14 @@ IDirect3DVR9 : public IUnknown{
+@@ -33,6 +33,15 @@ IDirect3DVR9 : public IUnknown{
    virtual HRESULT STDMETHODCALLTYPE UnlockDevice() = 0;
    virtual HRESULT STDMETHODCALLTYPE WaitDeviceIdle() = 0;
    virtual HRESULT STDMETHODCALLTYPE GetBackBufferData(SharedTextureHolder *backBufferData) = 0;
@@ -504,10 +515,11 @@ index b906cf7..bf5afcb 100644
 +  virtual HRESULT STDMETHODCALLTYPE UnlockVulkanQueue() = 0;
 +  virtual HRESULT STDMETHODCALLTYPE UploadOverlayPixels(uint64_t handle,const uint32_t* pixels,uint32_t width,uint32_t height) = 0;
 +  virtual HRESULT STDMETHODCALLTYPE SubmitOverlayTextures() = 0;
++  virtual HRESULT STDMETHODCALLTYPE WorldModelDepth(BOOL enabled) = 0;
  };
  
  #ifdef _MSC_VER
-@@ -42,4 +50,4 @@ __CRT_UUID_DECL(IDirect3DVR9, 0x7e272b32, 0xa49c, 0x46c7, 0xb1, 0xa4, 0xef, 0x52
+@@ -42,4 +51,4 @@ __CRT_UUID_DECL(IDirect3DVR9, 0x7e272b32, 0xa49c, 0x46c7, 0xb1, 0xa4, 0xef, 0x52
  #endif
  
  HRESULT __stdcall Direct3DCreateVRImpl(IDirect3DDevice9 *pDevice,
