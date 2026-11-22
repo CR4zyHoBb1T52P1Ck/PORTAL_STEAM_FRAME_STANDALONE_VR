@@ -4,10 +4,13 @@
 #include "menupose.h"
 #include "menuraster.h"
 #include "framestats.h"
+#include "scenebookmark53.h"
+#include "forearmroll54.h"
 #include "vrfocus.h"
 #include "openvr.h"
 #include "vector.h"
 #include <chrono>
+#include <atomic>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -24,6 +27,10 @@
 #include "reticle.h"
 #include "worldpush.h"
 #include "guncontact.h"
+#include "gunhandcontact.h"
+#include "supportgrip49.h"
+#include "gunanimation.h"
+#include "gunshellmesh.h"
 #include "creatorcamera.h"
 #include "triggercolors.h"
 
@@ -81,6 +88,9 @@ public:
 	uint32_t m_RecommendedWidth=0,m_RecommendedHeight=0;
 	uint32_t m_UpscaleWidth=0,m_UpscaleHeight=0;
 	bool m_UpscaleReady=false;
+    bool m_EyeMirrorCandidate=false,m_EyeMirrorFailed=false;
+    bool CanReuseEyeMirror() const;
+    void ImageBaseline(bool restore);
 	float m_CropWidth=1,m_CropHeight=1;
 	bool m_GraphicsOpen=false,m_GraphicsDirty=false,m_GraphicsApplyPending=true;
 	vr::VROverlayHandle_t m_GraphicsHandle=vr::k_ulOverlayHandleInvalid;
@@ -92,6 +102,9 @@ public:
 	double m_PerfElapsedMs=0;
 	std::vector<float> m_PerfIntervals,m_PerfGpu;
 	float m_LastEyeRenderMs=0,m_LastMirrorRenderMs=0,m_LastGpuWaitMs=0,m_LastBodyBuildMs=0;
+    SceneBookmark::Request m_SceneBookmark;
+    ForearmRoll54::History m_ForearmRoll;
+    float m_LastUpperCM[2]{},m_LastForearmCM[2]{};
     unsigned m_LastSecondaryViews=0,m_LastViewDepth=0,m_LastAvatarRebases=0,m_LastAvatarCacheHits=0;
 	FrameStats::Window m_FrameTimingWindow;
 	uint64_t m_FrameTimingPrevious=0,m_FrameTimingStart=0;
@@ -283,6 +296,7 @@ public:
     vr::VROverlayHandle_t m_ReticleHandle=0;
     int m_ReticleKey=-1;bool m_ReticleReady=false,m_ReticlePending=false;
     uint64_t m_ReticleRetry=0;
+    std::atomic<int> m_LastPortalShot{-1};
     BodyResponse::State m_SecondaryMotion;
     void UpdateCrosshair();
     matrix3x4_t m_ContactRelative[5]{};bool m_ContactValid[5]{};
@@ -372,6 +386,10 @@ public:
 	vr::VRActionHandle_t m_ActionSupportRight = 0;
 	bool m_OptionalSupportActive = false;
 	OptionalGunGrip::State m_OptionalGripState;
+    SupportGrip::Latch m_SupportLatch;
+    GunAnimation::State m_GunAnimation;
+    GunAnimation::Grip m_AnimatedSupport;
+    GunShell::Mesh m_GunShell;
 	matrix3x4_t m_SupportFromController{};
 	std::uint64_t m_SupportLastSeen = 0;
 	bool UpdateOptionalGunSupport(matrix3x4_t *target = nullptr);
@@ -402,6 +420,8 @@ public:
     PropHold::Input m_PropHold;int m_PropCarryMode=0;
     matrix3x4_t m_PropVisualRelative{},m_PropShapeRelative{},m_PropVisualFromGrab{};Vector m_PropShapeRadii{1,1,1};
     uint64_t m_PropVisualStamp=0;
+    uint64_t m_LastPhysicalPush=0;
+    GunHandContact::State m_GunHandContact[2];
     int PropMode() const{return m_PropHold.hand>=0?m_PropCarryMode:(m_Graphics.autoPalmStowed&&m_Weapon.stowed?1:m_Graphics.propGrabMode);}
     bool PropThrows() const{return m_Graphics.enhancedThrow||(m_Graphics.autoPalmStowed&&PropMode()==1);}
     float ForceGain() const{return m_Graphics.sandboxForces?std::clamp(m_Graphics.sandboxForceGain,1.f,10.f):1.f;}

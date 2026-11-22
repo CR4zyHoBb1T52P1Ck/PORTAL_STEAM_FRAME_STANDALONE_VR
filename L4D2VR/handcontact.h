@@ -7,7 +7,12 @@ inline matrix3x4_t Surface(const matrix3x4_t& raw,Vector normal,Vector position,
     if(orient&&TwoHandAim::Unit(normal)) {
         // Both Valve hand frames use -Y as the palm-facing direction.
         auto fingers=TwoHandAim::Axis(raw,0);fingers-=normal*TwoHandAim::Dot(fingers,normal);
-        if(!TwoHandAim::Unit(fingers)){fingers=CrossProduct(normal,{0,0,1});if(!TwoHandAim::Unit(fingers))fingers={1,0,0};}
+        if(fingers.LengthSqr()<.000001f||!TwoHandAim::Unit(fingers)){
+            // Keep the fallback in the tracked hand frame. World-up changes
+            // across a floor/ceiling portal and gave the preview another pose.
+            fingers=TwoHandAim::Axis(raw,2);fingers-=normal*TwoHandAim::Dot(fingers,normal);
+            if(!TwoHandAim::Unit(fingers)){fingers=CrossProduct(normal,TwoHandAim::Axis(raw,1));if(!TwoHandAim::Unit(fingers))fingers={1,0,0};}
+        }
         result=HandPose::Frame(fingers,normal,CrossProduct(fingers,normal),position);
     }
     for(int r=0;r<3;++r)result[r][3]=position[r];return result;

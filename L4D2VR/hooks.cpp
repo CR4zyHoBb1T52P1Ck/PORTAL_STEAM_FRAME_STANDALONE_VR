@@ -13,6 +13,13 @@
 #include "optionalgungrip.h"
 #include "gunattachments.h"
 #include "guneffects.h"
+#include "gunlightpose.h"
+#include "handownership.h"
+#include "lightocclusion.h"
+#include "gunindicator.h"
+#include "studioprobe53.h"
+#include "skintrial55.h"
+#include "modeldepth.h"
 #include "gunray.h"
 #include "portalshotfx.h"
 #include "firstpersonbody.h"
@@ -57,6 +64,8 @@ Hook<tCreateViewModel> Hooks::hkCreateViewModel = {};
 Hook<tGetAttachmentMatrix> Hooks::hkGetAttachmentMatrix = {};
 Hook<tGetAttachmentAngles> Hooks::hkGetAttachmentAngles = {};
 Hook<tPortalGunEffectParameters> Hooks::hkPortalGunEffectParameters = {};
+Hook<tPortalGunDrawEffects> Hooks::hkPortalGunDrawEffects = {};
+static GunLights::Views s_GunLightViews;
 static void *s_RightViewmodelRenderable = nullptr;
 static void *s_GunAttachmentRenderable = nullptr;
 static const void *s_GunAttachmentModel = nullptr;
@@ -73,6 +82,7 @@ static void *s_LeftArmRenderable = nullptr;
 static bool s_PairedHandMaterialReady=false;
 static AvatarPalette::Snapshot s_AvatarPalette;
 static uint64_t s_AvatarFrame=0;
+static matrix3x4_t s_FrozenGunBones[128]{};static bool s_FrozenGunReady=false;static bool s_CapturingGunBones=false;static void* s_FrozenGunRenderable=nullptr;
 static bool s_NativeAvatarDirectDrawn=false;
 static matrix3x4_t s_NativeAvatarSource[BodyIK::Max]{};
 static bool s_NativeAvatarSourceReady=false;
@@ -201,7 +211,7 @@ namespace
 		~ScopedPickupQuery() { s_PickupQuery = previous; }
 	};
 
-	bool ServerHandPose(void *player, Vector &position, QAngle &angles)
+	bool ServerHandPose(void *player, Vector &position, QAngle &angles,Vector* reference=nullptr)
 	{
 		auto *vr = Hooks::m_VR;
 		if (!vr || !vr->m_GrabPoseValid || !Hooks::hkEyePosition.isCreated()
@@ -209,6 +219,7 @@ namespace
 		Vector eye;
 		const Vector *actualEye = Hooks::hkEyePosition.fOriginal(player, &eye);
 		if (!actualEye) return false;
+        if(reference)*reference=*actualEye;
 		const auto hand = PortalPose::WorldHand(vr->m_GrabHandRelative,
 			*actualEye, Hooks::hkEyeAngles.fOriginal(player));
 		position = PortalPose::Position(hand);
@@ -312,6 +323,7 @@ namespace
             const bool pressure=NativePhysics::Push(NativePhysics::Physics(c.entity),c.pressure,c.pressurePoint);
             const bool impact=c.impact.LengthSqr()>.0001f&&s_PushCooldown.Accept(c.entity,time,g.impactCooldownMS/1000)
                 &&NativePhysics::Push(NativePhysics::Physics(c.entity),c.impact,c.impactPoint);
+            if(pressure||impact)vr->m_LastPhysicalPush=now;
             if(impact)vr->WeaponHaptic(c.source<2?c.source:vr->WeaponHand(),.65f,g.contactHaptics);
             static uint64_t nextAudit=0;if((pressure||impact)&&now>=nextAudit){nextAudit=now+500;
                 PortalVrLog("Physical contact source=%d entity=%p impulseNs=%f pressureN=%f dt=%f recovered=%d",c.source,c.entity,
@@ -328,9 +340,9 @@ namespace
     }
     thread_local void* s_PropUpdate=nullptr;
     static double PropTime(){return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();}
-    bool PropHandPose(matrix3x4_t& pose) {
+    bool PropHandPose(matrix3x4_t& pose,Vector* reference=nullptr) {
         Vector p;QAngle a;
-        if(!s_PropPlayer||!Hooks::m_VR->InteractionAllowed()||!ServerHandPose(s_PropPlayer,p,a))return false;
+        if(!s_PropPlayer||!Hooks::m_VR->InteractionAllowed()||!ServerHandPose(s_PropPlayer,p,a,reference))return false;
         pose=PortalPose::Frame(p,a);return PropInteraction::Valid(pose);
     }
     bool PropSurface(void* player,void* entity,const matrix3x4_t& hand,const matrix3x4_t& object,Vector& contact) {
@@ -348,11 +360,10 @@ namespace
         if(controller==s_PropUpdate&&vr&&vr->PropMode()==1&&vr->InteractionAllowed()) {
             // Native portal carry has a separate transformed target. Preserve
             // it while the object is on the other side of a linked portal.
-            const auto portalFlag=reinterpret_cast<uintptr_t>(controller)+0x12c1;
-            const bool across=SigScanner::IsReadable(portalFlag,1)&&*reinterpret_cast<unsigned char*>(portalFlag);
-            void* entity=s_PropBinding.Attached(controller);matrix3x4_t hand,object;
-            if(!across&&entity&&PropHandPose(hand)&&NativePhysics::Position(NativePhysics::Physics(entity),object)) {
-                const auto target=s_PropCarry.Target(controller,entity,1,vr->PropHand(),PropTime(),hand,object,vr->m_VRScale,vr->m_Graphics.palmSnap?vr->m_Graphics.palmCarryCM*vr->m_VRScale/100:-1);
+            const bool across=NativePhysics::HeldAcrossPortal(s_PropPlayer,s_PropBinding.portalCarryLayout);
+            void* entity=s_PropBinding.Attached(controller);matrix3x4_t hand,object;Vector reference;
+            if(!across&&entity&&PropHandPose(hand,&reference)&&NativePhysics::Position(NativePhysics::Physics(entity),object)) {
+                const auto target=s_PropCarry.Target(controller,entity,1,vr->PropHand(),PropTime(),hand,object,vr->m_VRScale,vr->m_Graphics.palmSnap?vr->m_Graphics.palmCarryCM*vr->m_VRScale/100:-1,vr->m_Graphics.propSmoothMS,reference);
                 s_SetPropTarget.fOriginal(controller,PortalPose::Position(target),PortalPose::Angles(target));return;
             }
             s_PropCarry.Reset();
@@ -366,7 +377,7 @@ namespace
         const auto now=GetTickCount64();
         bool apply=s_GripRelease&&vr&&vr->m_PropHold.throwRelease&&vr->PropThrows()&&vr->m_ThrowReleaseUntil&&now<=vr->m_ThrowReleaseUntil
             &&vr->InteractionAllowed()&&entity&&controller==s_PropCarry.controller&&entity==s_PropCarry.entity
-            &&vr->PropHand()==s_PropCarry.hand&&PropHandPose(hand);
+            &&vr->PropHand()==s_PropCarry.hand&&!NativePhysics::HeldAcrossPortal(s_PropPlayer,s_PropBinding.portalCarryLayout)&&PropHandPose(hand);
         if(apply) {
             s_PropCarry.motion.Push(PropTime(),hand,vr->m_VRScale);
             const auto get=SigScanner::GetVirtualFunction(entity,Portal1::VTableIndex::kServerEntity_GetRefEHandle);
@@ -609,6 +620,7 @@ namespace
                 header=view.header;length=view.modelLength;checksum=currentChecksum;
                 valid=view.modelLength<=64*1024*1024&&SigScanner::IsReadable(reinterpret_cast<uintptr_t>(view.header),view.modelLength)&&rig.Read(view.header,view.modelLength);
                 s_AvatarPalette.valid=false;
+                Hooks::m_VR->m_ForearmRoll.Reset();
                 PortalVrLog("Native whole-body rig valid=%d bones=%d leftWrist=%d rightWrist=%d",valid,view.count,rig.arm[0][2],rig.arm[1][2]);
             }
             if(valid) {
@@ -643,12 +655,32 @@ namespace
                     const auto headPose=PortalPose::Frame(s_BodyCameraCenter,Hooks::m_VR->m_HmdAngAbs);
                     const float gripFloors[2]={settings.gunGripPose?(primaryLeft?settings.gunGripCurl:settings.supportGripCurl)/100:0,
                         settings.gunGripPose?(!primaryLeft?settings.gunGripCurl:settings.supportGripCurl)/100:0};
+                    const float upperLengths[2]={settings.leftUpperLength/100,settings.rightUpperLength/100},lowerLengths[2]={settings.leftForearmLength/100,settings.rightForearmLength/100};
                     if(!rig.SolveNative(posed,headTarget,hands,Hooks::m_VR->m_HmdForward,fittedReach,settings.bodyIKInfluence,
-                        settings.bodyAutoReach,(settings.fingerTracking||settings.gunGripPose||settings.thumbPose||settings.thumbExtension>0)?curls:nullptr,gripping,&headPose,settings.fingerRange/100,settings.wristTwist/100,palm,handScale,wristScale,settings.palmDepth/100,fitted&&settings.rigidTorso,gripFloors,std::max(settings.thumbExtension,settings.thumbPose?70.f:0.f)/100))return false;
+                        settings.bodyAutoReach,(settings.fingerTracking||settings.gunGripPose||settings.thumbPose||settings.thumbExtension>0)?curls:nullptr,gripping,&headPose,settings.fingerRange/100,settings.wristTwist/100,palm,handScale,wristScale,settings.palmDepth/100,fitted&&settings.rigidTorso,gripFloors,std::max(settings.thumbExtension,settings.thumbPose?70.f:0.f)/100,settings.naturalForearms&&settings.bodyIKInfluence>0,upperLengths,lowerLengths))return false;
+                    if(settings.selfTouch&&settings.handContact&&!Hooks::m_VR->PortalContactClearance()) {
+                        FingerSurface::Shape torso;
+                        torso.frame=InteractionPolish::Torso(s_BodyCameraCenter,Hooks::m_VR->m_HmdForward,Hooks::m_VR->m_VRScale);
+                        torso.radii=Vector(.14f*std::clamp(settings.torsoWidth/100,.5f,2.f),.17f*std::clamp(settings.torsoWidth/100,.5f,2.f),.27f)*Hooks::m_VR->m_VRScale;
+                        for(int h=0;h<2;++h)rig.AvoidGunArm(posed,h,torso,Hooks::m_VR->m_VRScale,true);
+                    }
+                    if(settings.gunSurfacePose&&settings.gun&&!Hooks::m_VR->m_Weapon.stowed&&Hooks::m_VR->m_PortalAimLastSeen){
+                        FingerSurface::Shape shape;shape.gun=true;shape.frame=HandPose::Concat(Hooks::m_VR->GetGunControllerFrame(),Hooks::m_VR->m_GunFromController);Hooks::m_VR->m_GunAnimation.Shape(shape);
+                        for(int h=0;h<2;++h)rig.AvoidGunArm(posed,h,shape,Hooks::m_VR->m_VRScale);
+                    }
+                    unsigned rollMask=0;
+                    if(settings.naturalForearms&&settings.bodyIKInfluence>0){
+                        for(int h=0;h<2;++h)if(rig.wristTwist[h]>=0)
+                            if(ForearmRoll54::Apply(posed[rig.arm[h][1]],posed[rig.wristTwist[h]],posed[rig.arm[h][2]],rig.forearmWristFromElbow[h],rig.forearmHelperFromElbow[h],rig.forearmStation[h],Hooks::m_VR->m_ForearmRoll,h,s_AvatarFrame,settings.wristTwist/100,(h?settings.rightElbowRoll:settings.leftElbowRoll)/100,(h?settings.rightForearmRoll:settings.leftForearmRoll)/100,settings.boundedForearmRoll?std::chrono::duration<double>(timer.start.time_since_epoch()).count():-1))rollMask|=1u<<h;
+                    }else Hooks::m_VR->m_ForearmRoll.Reset();
+                    for(int h=0;h<2;++h){Hooks::m_VR->m_LastUpperCM[h]=sqrtf((TwoHandAim::Position(posed[rig.arm[h][1]])-TwoHandAim::Position(posed[rig.arm[h][0]])).LengthSqr())*100/Hooks::m_VR->m_VRScale;Hooks::m_VR->m_LastForearmCM[h]=sqrtf((TwoHandAim::Position(posed[rig.arm[h][2]])-TwoHandAim::Position(posed[rig.arm[h][1]])).LengthSqr())*100/Hooks::m_VR->m_VRScale;}
                     if(settings.bodyVolume)rig.Volume(posed,settings.upperArmWidth/100,settings.forearmWidth/100,settings.wristWidth/100,settings.handSize/100,settings.torsoWidth/100,settings.wristCuff/100);
-                    if(settings.gunSurfacePose&&!Hooks::m_VR->m_Weapon.stowed&&Hooks::m_VR->m_PortalAimLastSeen){
-                        FingerSurface::Shape shape;shape.gun=true;shape.frame=HandPose::Concat(Hooks::m_VR->GetGunControllerFrame(),Hooks::m_VR->m_GunFromController);
-                        for(int h=0;h<2;++h)if(gripping[h])rig.SurfaceFingers(posed,h,curls[h],settings.fingerRange/100,gripFloors[h],std::max(settings.thumbExtension,settings.thumbPose?70.f:0.f)/100,shape,settings.gunFingerMarginMM*Hooks::m_VR->m_VRScale/1000);
+                    for(int h=0;h<2;++h)if(upperLengths[h]!=1||lowerLengths[h]!=1)rig.ArmSkinLengths(posed,h);
+                    if(settings.gunSurfacePose&&settings.gun&&!Hooks::m_VR->m_Weapon.stowed&&Hooks::m_VR->m_PortalAimLastSeen){
+                        FingerSurface::Shape shape;shape.gun=true;shape.frame=HandPose::Concat(Hooks::m_VR->GetGunControllerFrame(),Hooks::m_VR->m_GunFromController);Hooks::m_VR->m_GunAnimation.Shape(shape);
+                        for(int h=0;h<2;++h){
+                            rig.SurfaceFingers(posed,h,curls[h],settings.fingerRange/100,gripping[h]?gripFloors[h]:0,std::max(settings.thumbExtension,settings.thumbPose?70.f:0.f)/100,shape,settings.gunFingerMarginMM*Hooks::m_VR->m_VRScale/1000);
+                        }
                     }
                     if(settings.propSurfacePose&&Hooks::m_VR->m_PropHold.attached&&Hooks::m_VR->PropMode()==1&&GetTickCount64()-Hooks::m_VR->m_PropVisualStamp<120){
                         FingerSurface::Shape shape;shape.frame=HandPose::Concat(PortalPose::Frame(Hooks::m_VR->m_GrabControllerPos,Hooks::m_VR->m_GrabControllerAng),Hooks::m_VR->m_PropShapeRelative);shape.radii=Hooks::m_VR->m_PropShapeRadii;
@@ -658,7 +690,7 @@ namespace
                     BodyResponse::Output secondary;
                     // Cosmetic skin motion stays visible while tuning the VR
                     // menu. World interaction and game simulation stay paused.
-                    if(settings.jiggle&&Hooks::m_VR->m_SystemFocus.Allowed()&&Hooks::m_VR->m_HmdPose.isValid) {
+                    if(SkinTrial55::Motion(SoftSkin::Marked(header,length),checksum,settings.skinTrialMode,settings.jiggle)&&Hooks::m_VR->m_SystemFocus.Allowed()&&Hooks::m_VR->m_HmdPose.isValid) {
                         const Vector trackedHands[2]={TwoHandAim::Position(Hooks::m_VR->GetPhysicalHandFrame(true)),TwoHandAim::Position(Hooks::m_VR->GetPhysicalHandFrame(false))};
                         const bool tracked[2]={Hooks::m_VR->m_ActionStateFresh&&(Hooks::m_VR->m_LeftHanded?Hooks::m_VR->m_RightControllerPose.isValid:Hooks::m_VR->m_LeftControllerPose.isValid),
                                                Hooks::m_VR->m_ActionStateFresh&&(Hooks::m_VR->m_LeftHanded?Hooks::m_VR->m_LeftControllerPose.isValid:Hooks::m_VR->m_RightControllerPose.isValid)};
@@ -670,7 +702,7 @@ namespace
                     }else Hooks::m_VR->m_SecondaryMotion.Reset();
                     rig.TorsoVolume(posed,settings.bodyVolume?settings.chestScale/100:1,settings.bodyVolume?settings.hipScale/100:1);
                     if(SoftSkin::Marked(header,length))SoftSkin::Apply(rig,posed,
-                        secondary.breast*(Hooks::m_VR->m_VRScale*settings.jiggleChest/100),secondary.glute*(Hooks::m_VR->m_VRScale*settings.jiggleHips/100));
+                        SkinTrial55::Limit(secondary.breast*(Hooks::m_VR->m_VRScale*settings.jiggleChest/100),Hooks::m_VR->m_VRScale,settings.skinTrialMM),SkinTrial55::Limit(secondary.glute*(Hooks::m_VR->m_VRScale*settings.jiggleHips/100),Hooks::m_VR->m_VRScale,settings.skinTrialMM));
                     s_AvatarPalette.Store(s_AvatarFrame,header,native[0],posed,view.count);
                     static unsigned audits=0;
                     if((audits++%600)==0)PortalVrLog("Whole-body pose serial=%llu bones=%d leftWristError=%f rightWristError=%f autoReach=%d influence=%f",s_AvatarFrame,view.count,
@@ -680,9 +712,16 @@ namespace
                         Vector grip;for(int r=0;r<3;++r)grip[r]=posed[rig.arm[h][2]][r][3]+(posed[rig.arm[h][2]][r][0]*rig.gripLocal[h].x+posed[rig.arm[h][2]][r][1]*rig.gripLocal[h].y+posed[rig.arm[h][2]][r][2]*rig.gripLocal[h].z)*(settings.palmDepth/100);
                         PortalVrLog("Palm grip target side=%d error=%f",h,sqrtf((grip-TwoHandAim::Position(hands[h])).LengthSqr()));
                     }
+                    if((audits%600)==1)for(int h=0;h<2;++h)PortalVrLog("Arm lengths serial=%llu side=%d upperCM=%f forearmCM=%f upperSetting=%f forearmSetting=%f",s_AvatarFrame,h,Hooks::m_VR->m_LastUpperCM[h],Hooks::m_VR->m_LastForearmCM[h],upperLengths[h]*100,lowerLengths[h]*100);
+                    if((audits%600)==1)PortalVrLog("Forearm roll serial=%llu enabled=%d solvedMask=%u leftAngle=%f rightAngle=%f localizedSkin=%d",s_AvatarFrame,settings.naturalForearms,rollMask,Hooks::m_VR->m_ForearmRoll.angle[0],Hooks::m_VR->m_ForearmRoll.angle[1],SoftSkin::Marked(header,length));
                 }
                 if(!s_AvatarPalette.Current(s_AvatarFrame,header))return false;
                 s_AvatarPalette.Copy(result,source[0],s_DrawingLocalPlayerBodyDirect,settings.portalPoseCache);
+                static unsigned poseCopies[2]{};const unsigned copyKind=s_DrawingLocalPlayerBodyDirect?0:1;
+                if(poseCopies[copyKind]++<4)PortalVrLog("Shared contact palette serial=%llu direct=%d left=%f,%f,%f right=%f,%f,%f",
+                    s_AvatarPalette.serial,s_DrawingLocalPlayerBodyDirect,
+                    result[rig.arm[0][2]][0][3],result[rig.arm[0][2]][1][3],result[rig.arm[0][2]][2][3],
+                    result[rig.arm[1][2]][0][3],result[rig.arm[1][2]][1][3],result[rig.arm[1][2]][2][3]);
                 // First-person-only visibility. Portal copies retain the entire
                 // same solved Chell, including native wrists, fingers and head.
                 if(s_DrawingLocalPlayerBodyDirect&&!s_CreatorMirrorPass) {
@@ -921,6 +960,7 @@ Hooks::Hooks(Game *game)
 	EnableIfCreated(hkGetAttachmentMatrix);
 	EnableIfCreated(hkGetAttachmentAngles);
 	EnableIfCreated(hkPortalGunEffectParameters);
+    EnableIfCreated(hkPortalGunDrawEffects);
 	EnableIfCreated(hkDrawModelExecute);
 	EnableIfCreated(hkPlayerPortalled);
 	EnableIfCreated(hkPlayerUse);
@@ -947,6 +987,9 @@ int Hooks::initSourceHooks()
 	CreateHookAt(hkSettingsClientCmdUnrestricted,SigScanner::GetVirtualFunction(settingsEngine,106),
 		reinterpret_cast<LPVOID>(&dSettingsClientCmdUnrestricted),"VR menu ClientCmd_Unrestricted",false);
 	const bool hasOffsets = m_Game->m_Offsets != nullptr;
+    CreateHookAt(hkPortalGunDrawEffects,NativePose::PortalGunEffectsDraw(m_Game->m_BaseClient),
+        reinterpret_cast<LPVOID>(&dPortalGunDrawEffects),"Portal1::PortalGunDrawEffects",false);
+    PortalVrLog("Owned gun sprite hook created=%d",hkPortalGunDrawEffects.isCreated());
 	CreateHookAt(hkPortalGunEffectParameters,
 		NativePose::PortalGunEffectParameters(reinterpret_cast<uintptr_t>(GetModuleHandleA("client.dll"))),
 		reinterpret_cast<LPVOID>(&dPortalGunEffectParameters), "Portal1::PortalGunEffectParameters", false);
@@ -1053,13 +1096,14 @@ int Hooks::initSourceHooks()
 			reinterpret_cast<LPVOID>(&dWeapon_ShootPosition), "Portal1::WeaponShootPosition", false);
 		CreateHookAt(hkComputeError, m_Game->m_Offsets->ComputeError.address,
 			reinterpret_cast<LPVOID>(&dComputeError), "Portal1::ComputeGrabError", false);
+		// Verify original carry instructions before creating its detour.
+        s_PropBinding=NativePhysics::Binding::Resolve(m_Game->m_BaseServer);
 		CreateHookAt(hkUpdateObject, m_Game->m_Offsets->UpdateObject.address,
 			reinterpret_cast<LPVOID>(&dUpdateObject), "Portal1::UpdateGrabObject", false);
-        s_PropBinding=NativePhysics::Binding::Resolve(m_Game->m_BaseServer);
         CreateHookAt(s_SetPropTarget,s_PropBinding.setTarget,reinterpret_cast<LPVOID>(&SetPropTargetHook),"Portal1::PropTarget",false);
         CreateHookAt(s_DetachProp,s_PropBinding.detach,reinterpret_cast<LPVOID>(&DetachPropHook),"Portal1::PropDetach",false);
         m_VR->m_PropInputSupported=s_PropBinding.shutdownPickup&&s_SetPropTarget.isCreated()&&s_DetachProp.isCreated();
-        PortalVrLog("Interaction-20 grip ownership ready=%d pickupShutdown=%p table=%p",m_VR->m_PropInputSupported,s_PropBinding.shutdownPickup,s_PropBinding.pickupTable);
+        PortalVrLog("Interaction-20 grip ownership ready=%d pickupShutdown=%p table=%p carryLayout=%d",m_VR->m_PropInputSupported,s_PropBinding.shutdownPickup,s_PropBinding.pickupTable,s_PropBinding.portalCarryLayout);
         PortalVrLog("Physics-16 native prop binding target=%p detach=%p attached=%p ready=%d",s_PropBinding.setTarget,s_PropBinding.detach,s_PropBinding.getAttached,s_SetPropTarget.isCreated()&&s_DetachProp.isCreated());
 		CreateHookAt(hkUpdateObjectVM, m_Game->m_Offsets->UpdateObjectVM.address,
 			reinterpret_cast<LPVOID>(&dUpdateObjectVM), "Portal1::UpdateGrabObjectVM", false);
@@ -1112,7 +1156,9 @@ bool __fastcall Hooks::dCHudCrosshair_ShouldDraw(void* ecx, void* edx) {
 
 	m_VR->m_DrawCrosshair = shouldDraw;
 
-	return ((m_VR->m_AimMode == 1) ? shouldDraw : false);
+    const bool originalArt=m_VR->m_Graphics.crosshair==4&&m_VR->InteractionAllowed()
+        &&!m_VR->m_Weapon.stowed&&m_VR->m_Graphics.gun;
+	return (m_VR->m_AimMode==1||originalArt)?shouldDraw:false;
 }
 
 void __fastcall Hooks::dPrecache(void* ecx, void* edx) {
@@ -1153,7 +1199,7 @@ void __fastcall Hooks::dPush3DView(void *ecx, void *edx, const CViewSetup &view,
     hkPush3DView.fOriginal(ecx, view, flags, target, frustum);
     const bool primary=IsBodyWorldView(view,target,nullptr);
     if(m_ActiveEyeTexture)s_ViewWork.View(primary,unsigned(s_BodyViewStack.size()+1));
-    s_BodyViewStack.push_back(primary);
+    s_BodyViewStack.push_back(primary);s_GunLightViews.Push(view.origin);
 }
 
 void __fastcall Hooks::dPush3DViewDepth(void *ecx, void *edx, const CViewSetup &view, int flags, ITexture *target, void *frustum, ITexture *depth)
@@ -1166,17 +1212,16 @@ void __fastcall Hooks::dPush3DViewDepth(void *ecx, void *edx, const CViewSetup &
         // The gun uses world-space tracked bones. Match the complete active
         // eye camera, including origin, angles and off-center projection.
         memcpy(&corrected,&s_EyeWorldView,sizeof(corrected));
-        corrected.zNear = view.zNear;
-        corrected.zFar = view.zFar;
+        RenderPolicy::ViewmodelEyeClip(corrected,view,m_VR->m_Graphics.gunWorldDepth);
         static unsigned logged = 0;
-        if (logged++ < 4) PortalVrLog("Viewmodel eye camera originalAspect=%f eyeAspect=%f originalFov=%f eyeFov=%f originDelta=%f angleDelta=%f",
+        if (logged++ < 4) PortalVrLog("Viewmodel eye camera originalAspect=%f eyeAspect=%f originalFov=%f eyeFov=%f originDelta=%f angleDelta=%f nativeClip=%f,%f eyeClip=%f,%f sceneDepth=%d",
             view.m_flAspectRatio,corrected.m_flAspectRatio,view.fov,corrected.fov,
-            sqrtf((view.origin-corrected.origin).LengthSqr()),sqrtf((view.angles-corrected.angles).LengthSqr()));
+            sqrtf((view.origin-corrected.origin).LengthSqr()),sqrtf((view.angles-corrected.angles).LengthSqr()),view.zNear,view.zFar,corrected.zNear,corrected.zFar,m_VR->m_Graphics.gunWorldDepth);
     }
     hkPush3DViewDepth.fOriginal(ecx, corrected, flags, target, frustum, depth);
     const bool primary=IsBodyWorldView(corrected,target,depth);
     if(m_ActiveEyeTexture)s_ViewWork.View(primary,unsigned(s_BodyViewStack.size()+1));
-    s_BodyViewStack.push_back(primary);
+    s_BodyViewStack.push_back(primary);s_GunLightViews.Push(corrected.origin);
 }
 
 void __fastcall Hooks::dRenderView(void *ecx, void *edx, CViewSetup &originalSetup, int nClearFlags, int whatToDraw)
@@ -1199,8 +1244,8 @@ void __fastcall Hooks::dRenderView(void *ecx, void *edx, CViewSetup &originalSet
         // Source is replacing models and entity handles. Only its normal load
         // view may render; no recursive eye or direct avatar draw is eligible.
         s_InlineBodyDrawEligible=s_ActiveFirstPersonBodyPass=s_DrawingLocalPlayerBodyDirect=false;
-        s_BodyViewStack.clear();s_BodyDrawTriggered=false;
-        s_NativeAvatarSourceReady=s_NativeAvatarDirectDrawn=s_AvatarPalette.valid=false;
+        s_BodyViewStack.clear();s_GunLightViews.Clear();s_BodyDrawTriggered=false;
+        s_NativeAvatarSourceReady=s_NativeAvatarDirectDrawn=s_AvatarPalette.valid=false;s_FrozenGunReady=false;s_FrozenGunRenderable=nullptr;m_VR->m_GunAnimation.valid=false;
         s_LocalPlayerEntity=s_LocalPlayerRenderable=nullptr;s_HasLocalPlayerBodyTransform=false;
         s_LocalWorldGunReady=false;s_LocalWorldGunEntity=s_LocalWorldGunRenderable=nullptr;
         s_RightViewmodelRenderable=s_LeftArmRenderable=s_GunAttachmentRenderable=nullptr;
@@ -1208,7 +1253,7 @@ void __fastcall Hooks::dRenderView(void *ecx, void *edx, CViewSetup &originalSet
         s_PropCarry.Reset();s_PropPlayer=s_PropController=nullptr;m_VR->m_PropHold.Detached();
         for(auto& sweep:s_PushSweeps)sweep={};s_PushCooldown={};
         m_VR->m_ContactResetUntil=GetTickCount64()+250;m_VR->m_ContactSnapshot=0;
-        m_VR->m_GunWallRetraction=0;m_VR->m_SecondaryMotion.Reset();
+        m_VR->m_GunWallRetraction=0;m_VR->m_SecondaryMotion.Reset();m_VR->m_ForearmRoll.Reset();
         m_VR->m_RenderedNewFrame=false;m_VR->m_GrabPoseValid=m_VR->m_PickupAimValid=false;
         return hkRenderView.fOriginal(ecx,setup,nClearFlags,whatToDraw);
     }
@@ -1259,6 +1304,7 @@ void __fastcall Hooks::dRenderView(void *ecx, void *edx, CViewSetup &originalSet
 	RenderPolicy::PrepareEye(setup,m_VR->m_ActiveLegacyEffects);
 	setup.zNear = CameraCollision::NearClip;
 	setup.zNearViewmodel = 2;
+    RenderPolicy::ViewmodelClip(setup,m_VR->m_Graphics.gunWorldDepth);
 	const auto eyeAngles=portalCamera.Map(QAngle(hmdAngle.x,hmdAngle.y,hmdAngle.z));
 	setup.angles = Vector(eyeAngles.x,eyeAngles.y,eyeAngles.z);
 
@@ -1282,6 +1328,34 @@ void __fastcall Hooks::dRenderView(void *ecx, void *edx, CViewSetup &originalSet
 	rightEyeView.origin = portalCamera.Map(m_VR->GetViewOriginRight(position));
     const Vector frozenCameraCenter=m_VR->GetViewOrigin(position);
     ++s_AvatarFrame;s_NativeAvatarDirectDrawn=false;s_NativeAvatarSourceReady=false;
+    // Freeze native weapon animation once before body solving and either eye.
+    // These are private matrices; Source's animation cache is never rewritten.
+    s_FrozenGunReady=false;s_FrozenGunRenderable=nullptr;m_VR->m_GunAnimation.valid=false;
+    if(m_VR->m_NativeModels&&m_VR->m_Graphics.gun&&!m_VR->m_Weapon.stowed&&m_VR->m_GunAnimation.metadata&&m_Game->m_Offsets->GetViewModel.valid){
+        if(auto* player=m_Game->GetLocalPortalPlayer()){
+            using GetVM=void*(__thiscall*)(void*,int,bool);
+            auto* vm=reinterpret_cast<GetVM>(m_Game->m_Offsets->GetViewModel.address)(player,0,false);
+            auto* renderable=vm?static_cast<unsigned char*>(vm)+4:nullptr;
+            if(renderable){
+                const auto getModel=SigScanner::GetVirtualFunction(renderable,Portal1::VTableIndex::kClientRenderable_GetModel);
+                const auto setup=SigScanner::GetVirtualFunction(renderable,Portal1::VTableIndex::kClientRenderable_SetupBones);
+                using Model=const void*(__thiscall*)(void*);using Bones=bool(__thiscall*)(void*,matrix3x4_t*,int,int,float);
+                struct CaptureGuard{CaptureGuard(){s_CapturingGunBones=true;}~CaptureGuard(){s_CapturingGunBones=false;}} captureGuard;
+                const bool same=getModel&&reinterpret_cast<Model>(getModel)(renderable)==s_GunAttachmentModel;
+                const bool sampled=same&&setup&&reinterpret_cast<Bones>(setup)(renderable,s_FrozenGunBones,128,0x7ff00,0.f);
+                if(sampled&&m_VR->m_GunAnimation.Update(s_FrozenGunBones,s_AvatarFrame)){
+                    s_FrozenGunReady=true;s_FrozenGunRenderable=renderable;
+                    static unsigned logs=0;if(logs++<8)PortalVrLog("Gun front animation frozen serial=%llu delta=%f,%f,%f",s_AvatarFrame,m_VR->m_GunAnimation.delta[0][3],m_VR->m_GunAnimation.delta[1][3],m_VR->m_GunAnimation.delta[2][3]);
+                    static matrix3x4_t previous{};static ULONGLONG nextMotionLog=0;static unsigned motionLogs=0;
+                    const auto& pose=m_VR->m_GunAnimation.delta;float change=0;for(int r=0;r<3;++r)for(int c=0;c<4;++c)change=std::max(change,std::abs(pose[r][c]-previous[r][c]));
+                    if(m_VR->m_OptionalSupportActive&&change>.015f&&GetTickCount64()>=nextMotionLog&&motionLogs<32){
+                        previous=pose;nextMotionLog=GetTickCount64()+100;++motionLogs;
+                        PortalVrLog("Gun front motion serial=%llu follow=%d delta=%f,%f,%f pitch=%f",s_AvatarFrame,m_VR->m_AnimatedSupport.bound,pose[0][3],pose[1][3],pose[2][3],pose[1][2]);
+                    }
+                }else {static unsigned failed=0;if(failed++<12)PortalVrLog("Gun animation sample unavailable same=%d sampled=%d failure=%d version=%d",same,sampled,m_VR->m_GunAnimation.failure,m_VR->m_GunAnimation.version);}
+            }
+        }
+    }
     if(m_VR->m_Graphics.bodyIK&&m_VR->m_FirstPersonBody) {
         if(auto* player=m_Game->GetLocalPortalPlayer()) {
             auto* renderable=reinterpret_cast<unsigned char*>(player)+4;
@@ -1327,6 +1401,8 @@ void __fastcall Hooks::dRenderView(void *ecx, void *edx, CViewSetup &originalSet
 	if (!rndrContext)
 		return hkRenderView.fOriginal(ecx, setup, nClearFlags, whatToDraw);
 
+    m_VR->m_EyeMirrorCandidate=false;
+    if(g_D3DVR9)g_D3DVR9->ProfileScene(0);
 	m_VR->m_BindingEyeTexture = VR::Texture_LeftEye;
 	rndrContext->PushRenderTargetAndViewport(
 		m_VR->m_LeftEyeTexture,
@@ -1349,6 +1425,7 @@ void __fastcall Hooks::dRenderView(void *ecx, void *edx, CViewSetup &originalSet
 	m_ActiveEyeTexture = nullptr;
 	rndrContext->PopRenderTargetAndViewport();
 	
+    if(g_D3DVR9)g_D3DVR9->ProfileScene(1);
 	// The right eye shares the already frozen head orientation and camera origin.
 
 	m_VR->m_BindingEyeTexture = VR::Texture_RightEye;
@@ -1378,6 +1455,10 @@ void __fastcall Hooks::dRenderView(void *ecx, void *edx, CViewSetup &originalSet
 	m_VR->m_LastEyeRenderMs=std::chrono::duration<float,std::milli>(std::chrono::steady_clock::now()-eyeRenderStart).count();
 	m_VR->m_LastMirrorRenderMs=0;
     m_VR->m_LastSecondaryViews=s_ViewWork.secondary;m_VR->m_LastViewDepth=s_ViewWork.maxDepth;m_VR->m_LastBodyBuildMs=s_ViewWork.bodyMs;
+    if(m_VR->m_Graphics.frameTimingLog&&s_AvatarFrame%144==0)
+        PortalVrLog("VR model workload serial=%llu secondaryViews=%u modelDraws=%u headerChecks=%u softProbesSkipped=%u softCandidates=%u",s_AvatarFrame,s_ViewWork.secondary,s_ViewWork.modelDraws,s_ViewWork.headerChecks,s_ViewWork.softProbesSkipped,s_ViewWork.softCandidates);
+    if(m_VR->m_SceneBookmark.pending&&m_VR->m_SceneBookmark.Take(true,m_Game->IsCursorVisible(),m_VR->m_GraphicsOpen,m_VR->m_SystemFocus.Allowed()))
+        PortalVrLog("VR scene bookmark id=%u serial=%llu phase=gameplay origin=%f,%f,%f angles=%f,%f,%f scene=%ux%u msaa=%d upscaler=%d upscaleReady=%d outputWidth=%u secondaryViews=%u maxViewDepth=%u eyeCpuMs=%f bodyCpuMs=%f",m_VR->m_SceneBookmark.serial,s_AvatarFrame,frozenCameraCenter.x,frozenCameraCenter.y,frozenCameraCenter.z,eyeAngles.x,eyeAngles.y,eyeAngles.z,m_VR->m_RenderWidth,m_VR->m_RenderHeight,m_VR->m_ActiveMsaa,m_VR->m_Graphics.upscaler,m_VR->m_UpscaleReady,m_VR->m_UpscaleReady?m_VR->m_VKUpscaledLeft.m_VulkanData.m_nWidth:m_VR->m_RenderWidth,s_ViewWork.secondary,s_ViewWork.maxDepth,m_VR->m_LastEyeRenderMs,s_ViewWork.bodyMs);
     const bool paletteCurrent=s_AvatarPalette.valid&&s_AvatarPalette.serial==s_AvatarFrame;
     m_VR->m_LastAvatarRebases=paletteCurrent?s_AvatarPalette.rebaseComputes:0;m_VR->m_LastAvatarCacheHits=paletteCurrent?s_AvatarPalette.rebaseHits:0;
 
@@ -1397,7 +1478,9 @@ void __fastcall Hooks::dRenderView(void *ecx, void *edx, CViewSetup &originalSet
 	rndrContext->SetRenderTarget(NULL);
 	rndrContext->Release();*/
 
-	if (m_VR->m_RenderWindow) {
+    if(g_D3DVR9)g_D3DVR9->ProfileScene(2);
+    m_VR->m_EyeMirrorCandidate=m_VR->CanReuseEyeMirror();
+	if (m_VR->m_RenderWindow&&!m_VR->m_EyeMirrorCandidate) {
 		const auto mirrorStart=std::chrono::steady_clock::now();
 		s_HasLocalPlayerBodyTransform = false;
 		s_BodyDrawTriggered = false;
@@ -1416,6 +1499,7 @@ void __fastcall Hooks::dRenderView(void *ecx, void *edx, CViewSetup &originalSet
 	}
 
 
+    if(g_D3DVR9)g_D3DVR9->ProfileScene(3);
 	m_VR->m_RenderedNewFrame = true;
 }
 
@@ -1550,12 +1634,26 @@ void __fastcall Hooks::dSettingsClientCmdUnrestricted(void* self,void*,const cha
 }
 
 namespace {
+    bool HiddenGunAttachment(void* renderable){
+        const bool owned=renderable&&(renderable==s_RightViewmodelRenderable||renderable==s_LocalWorldGunRenderable);
+        GunEffects::PositionScope::ObserveOwned(owned);
+        return Hooks::m_VR&&GunEffects::Hidden(Hooks::m_VR->m_IsVREnabled,
+            owned,
+            Hooks::m_VR->m_Weapon.stowed,Hooks::m_VR->m_Graphics.gun);
+    }
     bool TrackedGunAttachment(void *renderable, int number, matrix3x4_t& output) {
         auto *vr = Hooks::m_VR;
+        if(s_CapturingGunBones)return false;
+        auto* sprite=GunLights::DrawScope::Active();
+        if(sprite&&sprite->owned&&sprite->world&&renderable==s_LocalWorldGunRenderable)
+            return sprite->pose.Resolve(number,output);
         if (!vr || !vr->m_IsVREnabled || !vr->WeaponTracked()
             || !renderable || renderable != s_RightViewmodelRenderable
             || renderable != s_GunAttachmentRenderable || number < 1
             || number > s_GunAttachments.count) return false;
+        if(sprite&&sprite->owned&&!sprite->world&&sprite->ResolveCached(number,output)){
+            s_PortalCamera.Map(&output,1);return true;
+        }
         const auto getModel = SigScanner::GetVirtualFunction(renderable,Portal1::VTableIndex::kClientRenderable_GetModel);
         const auto setupBones = SigScanner::GetVirtualFunction(renderable,Portal1::VTableIndex::kClientRenderable_SetupBones);
         using GetModelFn = const void *(__thiscall *)(void *);
@@ -1569,9 +1667,13 @@ namespace {
         struct Guard { bool& value; Guard(bool& v):value(v) { value=true; } ~Guard() { value=false; } } guard(resolving);
         matrix3x4_t nativeBones[128];
         constexpr int usedByAttachment = 0x200;
-        if (!reinterpret_cast<SetupBonesFn>(setupBones)(renderable,nativeBones,128,usedByAttachment,0.0f)) return false;
+        if(s_FrozenGunReady&&renderable==s_FrozenGunRenderable)memcpy(nativeBones,s_FrozenGunBones,sizeof(nativeBones));
+        else if (!reinterpret_cast<SetupBonesFn>(setupBones)(renderable,nativeBones,128,usedByAttachment,0.0f)) return false;
         const auto controller = vr->GetGunControllerFrame();
-        if (!s_GunAttachments.Resolve(number,controller,nativeBones,output)) return false;
+        if(sprite&&sprite->owned&&!sprite->world){
+            sprite->StoreViewmodel(s_GunAttachments,controller,nativeBones);
+            if(!sprite->ResolveCached(number,output))return false;
+        }else if (!s_GunAttachments.Resolve(number,controller,nativeBones,output)) return false;
         s_PortalCamera.Map(&output,1);
         static int logged = 0;
         if (number == 1 && logged++ < 12)
@@ -1581,12 +1683,14 @@ namespace {
 }
 
 bool __fastcall Hooks::dGetAttachmentMatrix(void *ecx, void *edx, int number, matrix3x4_t& matrix) {
+    if(HiddenGunAttachment(ecx)){matrix=m_VR->GetHolsteredGunFrame();return false;}
     const bool result = hkGetAttachmentMatrix.fOriginal(ecx,number,matrix);
     if (result) TrackedGunAttachment(ecx,number,matrix);
     return result;
 }
 
 bool __fastcall Hooks::dGetAttachmentAngles(void *ecx, void *edx, int number, Vector& origin, QAngle& angles) {
+    if(HiddenGunAttachment(ecx)){const auto hidden=m_VR->GetHolsteredGunFrame();origin=PortalPose::Position(hidden);angles=PortalPose::Angles(hidden);return false;}
     const bool result = hkGetAttachmentAngles.fOriginal(ecx,number,origin,angles);
     matrix3x4_t matrix;
     if (result && TrackedGunAttachment(ecx,number,matrix)) {
@@ -1597,14 +1701,37 @@ bool __fastcall Hooks::dGetAttachmentAngles(void *ecx, void *edx, int number, Ve
     return result;
 }
 
+void __fastcall Hooks::dPortalGunDrawEffects(void* weapon,void*,bool worldModel) {
+    const bool owned=m_VR&&m_Game&&m_VR->m_IsVREnabled&&m_Game->IsInGame()&&weapon
+        &&(weapon==s_LocalWorldGunEntity||weapon==m_Game->GetLocalPortalWeapon());
+    if(!owned)return hkPortalGunDrawEffects.fOriginal(weapon,worldModel);
+    const auto& settings=m_VR->m_Graphics;
+    if(m_VR->m_Weapon.stowed||!settings.gun||(worldModel&&!settings.portalGunLights))return;
+    const auto pose=worldModel&&settings.portalGunPose?s_GunLightViews.Current(weapon,m_ActiveEyeTexture,s_AvatarFrame):GunLights::Pose{};
+    if(worldModel&&settings.portalGunPose&&!pose.model){
+        static unsigned missing=0;if(missing++<8)PortalVrLog("Unbound local world gun sprites skipped frame=%llu eye=%p",s_AvatarFrame,m_ActiveEyeTexture);
+        return; // Don't show a ghost at the native weapon's old entity pose.
+    }
+    GunLights::DrawScope scope(owned,worldModel,pose);
+    scope.cameraValid=s_GunLightViews.Camera(scope.camera);
+    if(worldModel&&pose.gunFrameValid){scope.gunFrame=pose.gunFrame;scope.gunFrameValid=true;}
+    struct DepthGuard{bool active=false;~DepthGuard(){if(active&&g_D3DVR9)g_D3DVR9->WorldModelDepth(FALSE);}} depth;
+    if(settings.gunWorldDepth&&settings.gunLightOcclusion&&g_D3DVR9)depth.active=g_D3DVR9->WorldModelDepth(ModelDepth::SpriteMode)==S_OK;
+    hkPortalGunDrawEffects.fOriginal(weapon,worldModel);
+    static unsigned audits[2]{};if(audits[worldModel?1:0]++<12)PortalVrLog("Gun sprite draw world=%d depth=%d posed=%d attachmentQueries=%u paletteBuilds=%u reused=%u",worldModel,depth.active,pose.model!=nullptr,scope.queries,scope.builds,scope.reuses);
+}
+
 void __fastcall Hooks::dPortalGunEffectParameters(void *ecx, void *, int index, void *color,
     float *size, void **material, Vector& position, bool worldModel) {
     GunEffects::PositionScope scope(position, m_VR && m_VR->m_IsVREnabled && !worldModel);
     hkPortalGunEffectParameters.fOriginal(ecx,index,color,size,material,position,worldModel);
     // Native claw/core sprites are drawn separately from the skinned gun.
     // Hiding gun bones alone leaves these emissive quads floating in space.
-    if(m_VR&&m_VR->m_IsVREnabled&&(!worldModel||ecx==s_LocalWorldGunEntity)&&(m_VR->m_Weapon.stowed||!m_VR->m_Graphics.gun)) {
-        if(size)*size=0;
+    const bool localWeapon=m_VR&&m_VR->m_IsVREnabled&&(scope.Owned()||!worldModel||ecx==s_LocalWorldGunEntity||
+        (m_Game&&ecx==m_Game->GetLocalPortalWeapon()));
+    if(m_VR&&GunEffects::Hidden(m_VR->m_IsVREnabled,localWeapon,m_VR->m_Weapon.stowed,m_VR->m_Graphics.gun)) {
+        GunEffects::Suppress(color,size);
+        static unsigned hidden[2]{};if(hidden[worldModel?1:0]++<8)PortalVrLog("Hidden stowed gun effect index=%d world=%d alpha=0 attachmentOwned=%d",index,worldModel,scope.Owned());
         return;
     }
     Vector nativePosition;
@@ -1613,6 +1740,33 @@ void __fastcall Hooks::dPortalGunEffectParameters(void *ecx, void *, int index, 
         if (logged++ < 18) PortalVrLog("Gun effect anchored index=%d removedProjectionOffset=%f position=%f,%f,%f",
             index,sqrtf((nativePosition-position).LengthSqr()),position.x,position.y,position.z);
     }
+    auto* draw=GunLights::DrawScope::Active();
+    if(localWeapon&&draw&&draw->owned&&draw->gunFrameValid&&m_VR->m_NativeModels&&GunIndicator::Top(index)&&
+       m_VR->m_GunShell.ready&&m_VR->m_GunAnimation.metadata&&m_VR->m_GunShell.checksum==m_VR->m_GunAnimation.checksum){
+        auto frame=draw->gunFrame;if(!worldModel)s_PortalCamera.Map(&frame,1);
+        position=GunShell::Transform(frame,GunIndicator::HousingAnchor());
+    }
+    if(localWeapon&&draw&&draw->owned&&GunIndicator::Top(index)&&m_VR->m_Graphics.gunIndicatorLastPortal&&m_VR->m_LastPortalShot.load(std::memory_order_relaxed)>=0){
+        if(!draw->indicatorAttempted){draw->indicatorAttempted=true;auto* system=m_Game?m_Game->GetMaterialSystem():nullptr;
+            auto* found=system?system->FindMaterial("sprites/glow04_noz","Other textures",false):nullptr;
+            draw->indicatorMaterial=found&&!found->IsErrorMaterial()?found:nullptr;
+            static unsigned logged=0;if(logged++<4)PortalVrLog("Neutral top indicator material ready=%d",draw->indicatorMaterial!=nullptr);}
+        // Keep the native material pointer only for this draw, not across maps.
+        auto* neutral=static_cast<IMaterial*>(draw->indicatorMaterial);
+        if(neutral&&material){*material=neutral;GunIndicator::Tint(index,m_VR->m_LastPortalShot.load(std::memory_order_relaxed),color);}
+    }
+    if(localWeapon&&m_VR->m_Graphics.gunLightOcclusion&&draw&&draw->owned&&draw->cameraValid&&draw->gunFrameValid){
+        auto frame=draw->gunFrame;if(!worldModel)s_PortalCamera.Map(&frame,1);
+        const bool mesh=m_VR->m_GunShell.ready&&m_VR->m_GunAnimation.metadata&&m_VR->m_GunShell.checksum==m_VR->m_GunAnimation.checksum;
+        unsigned tested=0;bool blocked=false;
+        if(mesh){const auto* parts=!worldModel&&m_VR->m_GunAnimation.valid?m_VR->m_GunAnimation.parts:nullptr;
+            if(!draw->shellAttempted){draw->shellAttempted=true;draw->shell.Prepare(m_VR->m_GunShell,frame,parts,draw->camera);}
+            blocked=draw->shell.Occluded(position,GunIndicator::Top(index),m_VR->m_Graphics.gunIndicatorWindowMM*m_VR->m_VRScale/1000,&tested);
+        }else{const auto delta=!worldModel&&m_VR->m_GunAnimation.valid?m_VR->m_GunAnimation.delta:HandPose::Frame({1,0,0},{0,1,0},{0,0,1},{0,0,0});blocked=LightOcclusion::Opaque(frame,delta,draw->camera,position);}
+        if(blocked)GunEffects::Suppress(color,size);
+        static unsigned rays=0;if(rays++<24)PortalVrLog("Gun opaque ray mesh=%d blocked=%d world=%d index=%d triangles=%u preparedQueries=%u partTransforms=%u",mesh,blocked,worldModel,index,tested,draw->shell.queries,draw->shell.partTransforms);
+    }
+
 }
 
 void __fastcall Hooks::dCalcViewModelView(void *ecx, void *edx, const Vector &eyePosition, const QAngle &eyeAngles)
@@ -1793,19 +1947,22 @@ void Hooks::dDrawModelExecute(void *ecx, void *edx, void *state, const ModelRend
     const auto *bones = static_cast<const matrix3x4_t *>(pCustomBoneToWorld);
     // Neutral repair also covers IK off, nonlocal Chell and alternate passes.
     // All changes are to a private draw palette, never Source's bone cache.
+    const auto prefix=StudioProbe::Read(state,[](uintptr_t address,size_t length){return SigScanner::IsReadable(address,length);});
+    const bool marked=prefix.header&&SoftSkin::Marked(prefix.header,prefix.length);
+    if(m_ActiveEyeTexture){++s_ViewWork.modelDraws;s_ViewWork.headerChecks+=prefix.checks;if(bones&&prefix.header&&!marked)++s_ViewWork.softProbesSkipped;if(marked)++s_ViewWork.softCandidates;}
     matrix3x4_t neutralSkin[BodyIK::Max];StudioBodyView softView;
     static BodyIK::Rig softRig;static const unsigned char* softHeader=nullptr;static bool softValid=false;
-    if(bones&&GetStudioBodyView(state,softView)&&SoftSkin::Marked(softView.header,softView.modelLength)
+    if(bones&&marked&&GetStudioBodyView(state,softView)
         &&SigScanner::IsReadable(reinterpret_cast<uintptr_t>(bones),softView.count*sizeof(matrix3x4_t))) {
         if(softHeader!=softView.header){softHeader=softView.header;softValid=SigScanner::IsReadable(reinterpret_cast<uintptr_t>(softView.header),softView.modelLength)&&softRig.Read(softView.header,softView.modelLength);}
         if(softValid){memcpy(neutralSkin,bones,softView.count*sizeof(matrix3x4_t));SoftSkin::Apply(softRig,neutralSkin);bones=neutralSkin;pCustomBoneToWorld=neutralSkin;}
     }
+    const bool localPlayerBody = IsLocalPlayerBody(info);
     struct DepthGuard{bool changed=false;~DepthGuard(){if(changed&&g_D3DVR9)g_D3DVR9->WorldModelDepth(FALSE);}} depthGuard;
     if(m_VR->m_Graphics.gunWorldDepth&&g_D3DVR9&&info.pModel&&m_Game->GetModelInfo()){
         const auto* name=m_Game->GetModelInfo()->GetModelName(info.pModel);
-        if(name&&strstr(name,"weapons/v_portalgun"))depthGuard.changed=g_D3DVR9->WorldModelDepth(TRUE)==S_OK;
+        if(InteractionPolish::SceneDepth(name,localPlayerBody&&s_DrawingLocalPlayerBodyDirect))depthGuard.changed=g_D3DVR9->WorldModelDepth(TRUE)==S_OK;
     }
-	const bool localPlayerBody = IsLocalPlayerBody(info);
     if(m_VR->m_IsVREnabled&&info.pModel&&m_Game->GetModelInfo()) {
         const auto* path=m_Game->GetModelInfo()->GetModelName(info.pModel);
         static std::vector<std::string> seen;
@@ -1866,8 +2023,8 @@ void Hooks::dDrawModelExecute(void *ecx, void *edx, void *state, const ModelRend
 	}
 
     if (m_VR->m_IsVREnabled && state) {
-        const auto *hdr = *reinterpret_cast<const unsigned char **>(state);
-        if (hdr && SigScanner::IsReadable(reinterpret_cast<uintptr_t>(hdr), 164)) {
+        const auto *hdr = prefix.header;
+        if (hdr) {
             const char *name = reinterpret_cast<const char *>(hdr + 12);
             const int count = *reinterpret_cast<const int *>(hdr + 156);
             if(count==1&&ModelPath::Equal(name,"weapons/w_portalgun.mdl")) {
@@ -1882,10 +2039,15 @@ void Hooks::dDrawModelExecute(void *ecx, void *edx, void *state, const ModelRend
                         static BindPoseCache::Entry cache;
                         const auto* bind=cache.Get(hdr,length,1,offset,*reinterpret_cast<const int*>(hdr+8));
                         if(bind) {
-                            const auto trackedModel=HandPose::Concat(HandPose::Concat(m_VR->m_Weapon.stowed?m_VR->GetHolsteredGunFrame():m_VR->GetGunControllerFrame(),m_VR->m_GunFromController),GunGrab::WorldFit());
+                            const auto gunBase=HandPose::Concat(m_VR->m_Weapon.stowed?m_VR->GetHolsteredGunFrame():m_VR->GetGunControllerFrame(),m_VR->m_GunFromController);
+                            const auto trackedModel=HandPose::Concat(gunBase,GunGrab::WorldFit());
                             const auto pass=info.pModelToWorld?*info.pModelToWorld:PortalPose::Frame(info.origin,info.angles);
                             const auto model=GunGrab::InPass(s_LocalWorldGunNativeModel,pass,trackedModel);
                             matrix3x4_t tracked=HandPose::Concat(model,bind[0]);auto mapped=info;
+                            static GunLights::WorldModel lightModel;static const unsigned char* lightHeader=nullptr;static int lightChecksum=0;
+                            const int checksum=*reinterpret_cast<const int*>(hdr+8);
+                            if(lightHeader!=hdr||lightChecksum!=checksum){lightHeader=hdr;lightChecksum=checksum;lightModel.Read(hdr,length);}
+                            if(lightModel.count)s_GunLightViews.Store({&lightModel,s_LocalWorldGunEntity,m_ActiveEyeTexture,s_AvatarFrame,tracked,GunGrab::InPass(s_LocalWorldGunNativeModel,pass,gunBase),true});
                             mapped.origin=TwoHandAim::Position(model);mapped.pModelToWorld=&model;
                             const Vector lighting=mapped.origin;mapped.pLightingOrigin=&lighting;
                             ModelDrawState::State trackedState;
@@ -1899,12 +2061,19 @@ void Hooks::dDrawModelExecute(void *ecx, void *edx, void *state, const ModelRend
             const auto kind = HandPose::Identify(name, count);
             const bool gun = kind == HandPose::Model::Gun;
             const bool hands = kind == HandPose::Model::Hands;
+            if(m_VR->m_NativeModels&&(gun||hands)&&!HandOwnership::TrackingReady(m_VR->m_ActionStateFresh,m_VR->WeaponTracked(),
+                bones&&SigScanner::IsReadable(reinterpret_cast<uintptr_t>(bones),count*sizeof(matrix3x4_t)),m_VR->m_RightControllerForward.LengthSqr())){
+                // Never fall through to the untracked flatscreen hand palette
+                // while VR input is still initializing. The body path is untouched.
+                static unsigned waiting=0;if(waiting++<8)PortalVrLog("Native viewmodel awaiting tracking gun=%d frame=%llu",gun,s_AvatarFrame);return;
+            }
             if ((gun || hands) && bones && SigScanner::IsReadable(reinterpret_cast<uintptr_t>(bones), count * sizeof(matrix3x4_t))
                 && m_VR->m_RightControllerForward.LengthSqr() > 0.9f) {
                 // The secondary native mesh contains both physical hands. Draw it once,
                 // including while the weapon is stowed or held in the left hand.
-                const bool nativeWhole=m_VR->m_Graphics.bodyIK&&s_NativeAvatarDirectDrawn&&s_AvatarPalette.valid&&s_AvatarPalette.serial==s_AvatarFrame;
-                if(hands&&m_VR->m_Graphics.body&&m_VR->m_Graphics.bodyIK&&s_AvatarPalette.valid&&s_AvatarPalette.serial==s_AvatarFrame)return;
+                const bool nativeWhole=HandOwnership::Body(m_VR->m_NativeModels,m_VR->m_Graphics.body,m_VR->m_Graphics.bodyIK,m_VR->m_FirstPersonBody,s_NativeAvatarSourceReady);
+                if(gun&&s_AvatarFrame<=8)PortalVrLog("Startup hand owner frame=%llu eye=%p body=%d source=%d paired=%d material=%d directDrawn=%d",s_AvatarFrame,m_ActiveEyeTexture,nativeWhole,s_NativeAvatarSourceReady,s_LeftArmRenderable!=nullptr,s_PairedHandMaterialReady,s_NativeAvatarDirectDrawn);
+                if(hands&&nativeWhole)return;
                 const bool bothHands=hands&&m_VR->m_NativeModels&&s_LeftArmRenderable;
                 if(bothHands&&info.pRenderable!=s_LeftArmRenderable)return;
                 if(hands&&m_VR->m_NativeModels&&!bothHands&&!NativeFit::HandModelVisible(info.pRenderable==s_LeftArmRenderable,m_VR->m_Graphics))return;
@@ -1970,6 +2139,8 @@ void Hooks::dDrawModelExecute(void *ecx, void *edx, void *state, const ModelRend
                         const bool readable=modelLength>=248&&modelLength<=64*1024*1024&&SigScanner::IsReadable(reinterpret_cast<uintptr_t>(hdr),modelLength);
                         metadataValid=readable&&s_GunAttachments.Read(hdr,modelLength,reference,m_VR->m_NativeModels);
                         socketValid=readable&&OptionalGunGrip::ReadSocket(hdr,modelLength,cachedSocket,m_VR->m_NativeModels);
+                        if(readable&&m_VR->m_NativeModels){const bool ready=m_VR->m_GunAnimation.Read(hdr,modelLength,reference);
+                            PortalVrLog("Gun animated front metadata valid=%d version=%d failure=%d",ready,m_VR->m_GunAnimation.version,m_VR->m_GunAnimation.failure);}
                         PortalVrLog("Gun metadata cached model=%p checksum=%d attachments=%d socket=%d",hdr,checksum,metadataValid,socketValid);
                     }
                     if (info.pRenderable == s_RightViewmodelRenderable) {
@@ -1984,7 +2155,8 @@ void Hooks::dDrawModelExecute(void *ecx, void *edx, void *state, const ModelRend
                             } else m_VR->m_PortalAimLastSeen = 0;
                         }
                     }
-                    for (int i = 24; i < count; ++i) tracked[i] = HandPose::Reanchor(bones[i], bones[24], gunTarget);
+                    const auto* animation=s_FrozenGunReady&&info.pRenderable==s_FrozenGunRenderable?s_FrozenGunBones:bones;
+                    for (int i = 24; i < count; ++i) tracked[i] = HandPose::Reanchor(animation[i], animation[24], gunTarget);
                     if (info.pRenderable == s_GunAttachmentRenderable && s_GunAttachments.hasBarrel) {
                         // Compare the actual submitted skeleton with the shot
                         // line; synthetic rigid-bone tests cannot expose a
@@ -2026,15 +2198,24 @@ void Hooks::dDrawModelExecute(void *ecx, void *edx, void *state, const ModelRend
                     const bool primaryPhysicalLeft=(m_VR->WeaponHand()==0)!=m_VR->m_LeftHanded;
                     const bool supporting=m_VR->m_OptionalSupportActive;
                     HandPose::AlignBareArms(reference, tracked, leftTarget, physicalRight);
+                    if(m_VR->m_Graphics.gunSurfacePose&&m_VR->m_Graphics.gun&&!m_VR->m_Weapon.stowed&&m_VR->m_PortalAimLastSeen){
+                        static const BodyIK::Rig armRig=[](){BodyIK::Rig r;r.count=43;
+                            for(int h=0;h<2;++h){const int off=h?19:0;r.arm[h][0]=6+off;r.arm[h][1]=7+off;r.arm[h][2]=8+off;
+                                for(int root=6+off;root<=8+off;++root)for(int i=root;i<24+off;++i)r.below[root][i]=true;}
+                            return r;}();
+                        FingerSurface::Shape shape;shape.gun=true;shape.frame=HandPose::Concat(m_VR->GetGunControllerFrame(),m_VR->m_GunFromController);m_VR->m_GunAnimation.Shape(shape);
+                        armRig.AvoidGunArm(tracked,0,shape,m_VR->m_VRScale);
+                        armRig.AvoidGunArm(tracked,1,shape,m_VR->m_VRScale);
+                    }
                     static const float supportCurl[5] = {0.30f, 0.40f, 0.45f, 0.45f, 0.45f};
                     if(m_VR->m_NativeModels&&(m_VR->m_Graphics.fingerTracking||m_VR->m_Graphics.gunGripPose||m_VR->m_Graphics.thumbPose||m_VR->m_Graphics.thumbExtension>0)) {
                         float leftCurl[5],rightCurl[5];m_VR->AvatarFingerCurls(true,leftCurl);m_VR->AvatarFingerCurls(false,rightCurl);
                         const auto& pose=m_VR->m_Graphics;const float extension=std::max(pose.thumbExtension,pose.thumbPose?70.f:0.f)/100;
                         NativeFingers::TrackedHand(reference,tracked,leftCurl,true,!m_VR->m_Weapon.stowed&&(primaryPhysicalLeft||supporting),m_VR->m_Graphics.fingerRange/100,pose.gunGripPose?(primaryPhysicalLeft?pose.gunGripCurl:pose.supportGripCurl)/100:0,extension);
                         NativeFingers::TrackedHand(reference,tracked,rightCurl,false,!m_VR->m_Weapon.stowed&&(!primaryPhysicalLeft||supporting),m_VR->m_Graphics.fingerRange/100,pose.gunGripPose?(!primaryPhysicalLeft?pose.gunGripCurl:pose.supportGripCurl)/100:0,extension);
-                        if(pose.gunSurfacePose&&!m_VR->m_Weapon.stowed&&m_VR->m_PortalAimLastSeen){FingerSurface::Shape shape;shape.gun=true;shape.frame=HandPose::Concat(m_VR->GetGunControllerFrame(),m_VR->m_GunFromController);
-                            if(primaryPhysicalLeft||supporting)NativeFingers::Surface(reference,tracked,leftCurl,true,pose.fingerRange/100,(pose.gunGripPose?(primaryPhysicalLeft?pose.gunGripCurl:pose.supportGripCurl)/100:0),extension,shape,pose.gunFingerMarginMM*m_VR->m_VRScale/1000);
-                            if(!primaryPhysicalLeft||supporting)NativeFingers::Surface(reference,tracked,rightCurl,false,pose.fingerRange/100,(pose.gunGripPose?(!primaryPhysicalLeft?pose.gunGripCurl:pose.supportGripCurl)/100:0),extension,shape,pose.gunFingerMarginMM*m_VR->m_VRScale/1000);
+                        if(pose.gunSurfacePose&&!m_VR->m_Weapon.stowed&&m_VR->m_PortalAimLastSeen){FingerSurface::Shape shape;shape.gun=true;shape.frame=HandPose::Concat(m_VR->GetGunControllerFrame(),m_VR->m_GunFromController);m_VR->m_GunAnimation.Shape(shape);
+                            NativeFingers::Surface(reference,tracked,leftCurl,true,pose.fingerRange/100,(pose.gunGripPose&&(primaryPhysicalLeft||supporting)?(primaryPhysicalLeft?pose.gunGripCurl:pose.supportGripCurl)/100:0),extension,shape,pose.gunFingerMarginMM*m_VR->m_VRScale/1000);
+                            NativeFingers::Surface(reference,tracked,rightCurl,false,pose.fingerRange/100,(pose.gunGripPose&&(!primaryPhysicalLeft||supporting)?(!primaryPhysicalLeft?pose.gunGripCurl:pose.supportGripCurl)/100:0),extension,shape,pose.gunFingerMarginMM*m_VR->m_VRScale/1000);
                         }
                     }
                     else if(!m_VR->m_NativeModels)HandPose::ApplyFingerCurl(reference, tracked,
@@ -2062,7 +2243,7 @@ void Hooks::dDrawModelExecute(void *ecx, void *edx, void *state, const ModelRend
                         NativeFit::BothHandsVisibility(tracked,s.bodyIK?1:s.arms,showLeft,showRight);
                     } else {
                         auto s=m_VR->m_Graphics;
-                        if(gun&&(nativeWhole||(s_LeftArmRenderable&&s_PairedHandMaterialReady)))s.arms=2; // hands live in the paired native mesh
+                        if(gun&&HandOwnership::HideGunHands(m_VR->m_NativeModels,s_LeftArmRenderable!=nullptr,nativeWhole))s.arms=2; // choose ownership independently of material/draw order
                         if(gun&&m_VR->m_Weapon.stowed)s.gun=false;
                         NativeFit::Visibility(tracked,count,gun,info.pRenderable==s_LeftArmRenderable,s);
                     }
@@ -2225,6 +2406,7 @@ float __fastcall Hooks::dTraceFirePortal(void* ecx, void* edx, bool secondary,
     }
     const float result = hkTraceFirePortal.fOriginal(ecx, secondary, shotStart, shotDirection, trace,
         finalPosition, finalAngles, placedBy, test);
+    if(!test&&placedBy==2&&m_VR->m_IsVREnabled)m_VR->m_LastPortalShot.store(secondary?1:0,std::memory_order_relaxed);
     static unsigned diagnosed=0;
     if (!test && placedBy==2 && diagnosed++<2000 && trace) {
         const auto& hit=*static_cast<const CGameTrace*>(trace);
@@ -2325,6 +2507,7 @@ void __fastcall Hooks::dPlayerPortalled(void* ecx, void* edx, void* portal)
 	s_PropCarry.Reset();s_PropPlayer=nullptr;
 	m_VR->m_PropHold.CancelThrow();
 	m_VR->m_SecondaryMotion.Reset();
+	m_VR->m_ForearmRoll.Reset();
     m_VR->m_ContactResetUntil=GetTickCount64()+250;m_VR->m_GunWallRetraction=0;
     for(auto& sweep:s_PushSweeps)sweep={};s_PushCooldown={};
 	m_VR->m_HandContact[0]=m_VR->m_HandContact[1]={};m_VR->m_ThrowReleaseUntil=0;
@@ -2542,7 +2725,7 @@ void __cdecl Hooks::dGetHudSize(int& w, int& h) {
 
 void __fastcall Hooks::dPush2DView(void* ecx, void* edx, const CViewSetup& view, int nFlags, ITexture* pRenderTarget, void* frustumPlanes) {
 	hkPush2DView.fOriginal(ecx, view, nFlags, pRenderTarget, frustumPlanes);
-	s_BodyViewStack.push_back(false);
+	s_BodyViewStack.push_back(false);s_GunLightViews.Push();
 }
 
 void __fastcall Hooks::dPopView(void* ecx, void* edx, void* frustumPlanes) {
@@ -2556,6 +2739,7 @@ void __fastcall Hooks::dPopView(void* ecx, void* edx, void* frustumPlanes) {
 		}
 		s_BodyViewStack.pop_back();
 	}
+	s_GunLightViews.Pop();
 	hkPopView.fOriginal(ecx, frustumPlanes);
 }
 
@@ -2649,8 +2833,7 @@ bool __fastcall Hooks::dUpdateObject(void* ecx, void* edx, void* pPlayer, float 
                     PortalVrLog("Palm surface captured hand=%d radiusCM=%f",m_VR->PropHand(),radius*100/m_VR->m_VRScale);
                 }
             }
-            const auto portalFlag=reinterpret_cast<uintptr_t>(ecx)+0x12c1;
-            const bool across=SigScanner::IsReadable(portalFlag,1)&&*reinterpret_cast<unsigned char*>(portalFlag);
+            const bool across=NativePhysics::HeldAcrossPortal(pPlayer,s_PropBinding.portalCarryLayout);
             if(s_PropCarry.surface&&m_VR->PropMode()==1&&!across&&!m_VR->PortalContactClearance()){
                 const auto visual=HandPose::Concat(HandPose::Concat(object,s_PropCarry.palmFromObject),m_VR->m_PropVisualFromGrab);
                 m_VR->m_PropVisualRelative=HandPose::Concat(HandPose::InverseRigid(hand),visual);

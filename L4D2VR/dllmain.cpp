@@ -559,7 +559,7 @@ namespace
 DWORD WINAPI InitL4D2VR(LPVOID)
 {
     PortalVrResetLog();
-    PortalVrLog("Init thread start revision=Polish-22 compiled=%s %s process=%lu",__DATE__,__TIME__,static_cast<unsigned long>(GetCurrentProcessId()));
+    PortalVrLog("Init thread start revision=Contact-55 compiled=%s %s process=%lu",__DATE__,__TIME__,static_cast<unsigned long>(GetCurrentProcessId()));
     if (kDisableDxvkVrProviders)
     {
         SetEnvironmentVariableA("DXVK_NO_VR", "1");

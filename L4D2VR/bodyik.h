@@ -3,7 +3,9 @@
 #include "twohandaim.h"
 #include "fingerrange.h"
 #include "fingersurface.h"
+#include "gunhandcontact.h"
 #include "posetwist.h"
+#include "forearmroll54.h"
 #include <cstring>
 #include <string>
 namespace BodyIK {
@@ -43,6 +45,7 @@ struct Rig {
     int eyeBone=-1;matrix3x4_t eyeLocal{};
     matrix3x4_t bind[Max]{},wristFromSemantic[2]{};
     Vector palm[2]{},gripLocal[2]{};matrix3x4_t bodyBindFrame{};int wristTwist[2]={-1,-1};
+    matrix3x4_t forearmWristFromElbow[2]{},forearmHelperFromElbow[2]{};float forearmStation[2]={.5f,.5f};
     int fingers[2][5][3]{};
     matrix3x4_t fingerLocal[2][5][3]{};Vector fingerAxis[2][5][3]{};
     bool below[Max][Max]{};
@@ -66,6 +69,13 @@ struct Rig {
             wristTwist[h]=find(h?"wrist_twist_R":"wrist_twist_L");
             leg[h][0]=find(h?"thigh_R":"thigh_L");leg[h][1]=find(h?"knee_R":"knee_L");leg[h][2]=find(h?"ankle_R":"ankle_L");
             for(int j=0;j<3;++j)if(arm[h][j]<0||leg[h][j]<0)return false;
+            if(wristTwist[h]>=0){
+                const auto inverse=HandPose::InverseRigid(bind[arm[h][1]]);
+                forearmWristFromElbow[h]=HandPose::Concat(inverse,bind[arm[h][2]]);
+                forearmHelperFromElbow[h]=HandPose::Concat(inverse,bind[wristTwist[h]]);
+                const auto axis=TwoHandAim::Position(bind[arm[h][2]])-TwoHandAim::Position(bind[arm[h][1]]);
+                forearmStation[h]=axis.LengthSqr()>1e-6f?std::clamp(TwoHandAim::Dot(TwoHandAim::Position(bind[wristTwist[h]])-TwoHandAim::Position(bind[arm[h][1]]),axis)/axis.LengthSqr(),0.f,1.f):.5f;
+            }
         }
         if(hips<0||spine<0||chest<0||neck<0||head<0)return false;
         for(int h=0;h<2;++h) {
@@ -150,6 +160,30 @@ struct Rig {
         const auto joint=TwoBone(pivot,target,upper,lower,pole);if(!joint.valid)return false;
         RotateBranch(bones,root,joint.elbow,mid);RotateBranch(bones,mid,joint.end,end);return true;
     }
+    bool ArmSegments(matrix3x4_t* bones,const int chain[3],Vector target,Vector pole,float upper,float lower,bool autoReach) const {
+        const int root=chain[0],mid=chain[1],end=chain[2];
+        if(!bones||root<0||mid<0||end<0||!TwoHandAim::Finite(target)||!std::isfinite(upper)||!std::isfinite(lower)||upper<.01f||lower<.01f)return false;
+        const auto shoulder=TwoHandAim::Position(bones[root]),elbow=TwoHandAim::Position(bones[mid]),wrist=TwoHandAim::Position(bones[end]);
+        const float oldUpper=sqrtf((elbow-shoulder).LengthSqr()),oldLower=sqrtf((wrist-elbow).LengthSqr());
+        if(oldUpper<.01f||oldLower<.01f)return false;
+        const float distance=sqrtf((target-shoulder).LengthSqr());if(!std::isfinite(distance))return false;
+        if(autoReach){const float d=std::max(distance,.003f);upper=std::clamp(upper,std::abs(d-lower)+.001f,d+lower-.001f);}
+        const auto newElbow=shoulder+(elbow-shoulder)*(upper/oldUpper),newWrist=newElbow+(wrist-elbow)*(lower/oldLower);
+        // Stretch only segment positions; the complete hand remains a rigid branch.
+        for(int i=0;i<count;++i)if(below[root][i]){
+            const auto p=TwoHandAim::Position(bones[i]);const auto moved=below[end][i]?p+(newWrist-wrist):below[mid][i]?newElbow+(p-elbow)*(lower/oldLower):shoulder+(p-shoulder)*(upper/oldUpper);
+            for(int r=0;r<3;++r)bones[i][r][3]=moved[r];
+        }
+        const auto joint=TwoBone(shoulder,target,upper,lower,pole);if(!joint.valid)return false;
+        RotateBranch(bones,root,joint.elbow,mid);RotateBranch(bones,mid,joint.end,end);return true;
+    }
+    void ArmSkinLengths(matrix3x4_t* bones,int h)const {
+        const int root=arm[h][0],mid=arm[h][1],end=arm[h][2];
+        Vector axes[2]={TwoHandAim::Position(bones[mid])-TwoHandAim::Position(bones[root]),TwoHandAim::Position(bones[end])-TwoHandAim::Position(bones[mid])};
+        const float original[2]={sqrtf((TwoHandAim::Position(bind[mid])-TwoHandAim::Position(bind[root])).LengthSqr()),sqrtf((TwoHandAim::Position(bind[end])-TwoHandAim::Position(bind[mid])).LengthSqr())};
+        float scales[2];for(int s=0;s<2;++s){scales[s]=sqrtf(axes[s].LengthSqr())/original[s];if(!std::isfinite(scales[s])||!TwoHandAim::Unit(axes[s]))return;}
+        for(int i=0;i<count;++i)if(below[root][i]&&!below[end][i]){const int s=below[mid][i]?1:0;for(int c=0;c<3;++c){const auto v=TwoHandAim::Axis(bones[i],c),next=v+axes[s]*(TwoHandAim::Dot(v,axes[s])*(scales[s]-1));for(int r=0;r<3;++r)bones[i][r][c]=next[r];}}
+    }
     matrix3x4_t WristTarget(const matrix3x4_t& valveHand,int physical) const {
         const auto forward=TwoHandAim::Axis(valveHand,0),thumb=TwoHandAim::Axis(valveHand,2)*(physical? -1.f:1.f);
         const auto semantic=HandPose::Frame(forward,CrossProduct(thumb,forward),thumb,TwoHandAim::Position(valveHand));
@@ -177,6 +211,31 @@ struct Rig {
         if(!values)return;
         for(int f=0;f<5;++f){const float wanted=f?std::max(FingerRange::Amount(values[f],gain),floor*(f==1?.25f:1.f)):FingerRange::Amount(values[f],gain);
             FingerSurface::Clamp(bones,arm[h][2],fingers[h][f],fingerLocal[h][f],fingerAxis[h][f],f,wanted,extension,shape,margin);}
+    }
+    void AvoidGunArm(matrix3x4_t* bones,int h,const FingerSurface::Shape& shape,float units,bool torso=false) const {
+        const int root=arm[h][0],mid=arm[h][1],end=arm[h][2];
+        if(root<0||mid<0||end<0||!std::isfinite(units)||units<1)return;
+        const auto shoulder=TwoHandAim::Position(bones[root]),elbow=TwoHandAim::Position(bones[mid]),wrist=TwoHandAim::Position(bones[end]);
+        const auto hand=bones[end];const float radius=units*.023f;
+        auto penalty=[&](Vector joint){
+            // The upper-arm root is naturally inside its shoulder. Do not
+            // penalize that attachment when clearing the torso itself.
+            const auto start=torso?shoulder+(joint-shoulder)*.35f:shoulder;
+            return std::max(GunHandContact::SegmentPenalty(start,joint,shape,radius),GunHandContact::SegmentPenalty(joint,wrist,shape,radius));};
+        float best=penalty(elbow);if(best<.001f)return;
+        auto axis=wrist-shoulder;if(!TwoHandAim::Unit(axis))return;
+        const float upper=sqrtf((elbow-shoulder).LengthSqr()),lower=sqrtf((wrist-elbow).LengthSqr());
+        Vector selected=elbow;
+        // Choose the smallest elbow-plane change that clears the gun. Bone
+        // lengths, shoulder and wrist targets remain fixed; visual bones only.
+        for(int step=1;step<=12&&best>.001f;++step)for(float sign:{-1.f,1.f}){
+            const auto rotation=HandPose::RotateAroundAxis(axis,sign*step*.261799388f);
+            const auto pole=TwoHandAim::Position(HandPose::Concat(rotation,HandPose::Frame({1,0,0},{0,1,0},{0,0,1},elbow-shoulder)));
+            const auto candidate=TwoBone(shoulder,wrist,upper,lower,pole);if(!candidate.valid)continue;
+            const float score=penalty(candidate.elbow);if(score<best-.001f){best=score;selected=candidate.elbow;}
+        }
+        if((selected-elbow).LengthSqr()<.000001f)return;
+        RotateBranch(bones,root,selected,mid);RotateBranch(bones,mid,wrist,end);ReanchorBranch(bones,end,hand);
     }
     void FitLegs(matrix3x4_t* bones,const matrix3x4_t feet[2],Vector forward,float physicalCrouch,float unit,bool stable) const {
         for(int h=0;h<2;++h) {
@@ -292,7 +351,7 @@ struct Rig {
             if(i==chest||parents[i]==spine)Radial(bones[i],vertical,std::clamp(chestAmount,.75f,2.3f));
         }
     }
-    bool SolveNative(matrix3x4_t* bones,const Vector& headTarget,const matrix3x4_t hands[2],Vector forward,float reach,float influence,bool autoReach,const float* curls[2],const bool gripping[2],const matrix3x4_t* headPose=nullptr,float fingerGain=1,float twistFraction=.5f,bool palmAnchor=false,float handScale=1,float wristScale=1,float palmDepth=1,bool preserveTorso=false,const float* gripFloors=nullptr,float thumbExtension=0) const {
+    bool SolveNative(matrix3x4_t* bones,const Vector& headTarget,const matrix3x4_t hands[2],Vector forward,float reach,float influence,bool autoReach,const float* curls[2],const bool gripping[2],const matrix3x4_t* headPose=nullptr,float fingerGain=1,float twistFraction=.5f,bool palmAnchor=false,float handScale=1,float wristScale=1,float palmDepth=1,bool preserveTorso=false,const float* gripFloors=nullptr,float thumbExtension=0,bool deferTwist=false,const float* upperScale=nullptr,const float* forearmScale=nullptr) const {
         if(!bones||count<1||!TwoHandAim::Finite(headTarget)||!std::isfinite(influence))return false;
         influence=std::clamp(influence,0.f,1.f);if(influence==0)return true;
         forward.z=0;if(!TwoHandAim::Unit(forward))forward={1,0,0};const auto right=CrossProduct(forward,{0,0,1});
@@ -305,18 +364,24 @@ struct Rig {
             auto desired=WristTarget(hands[h],h);
             const auto gripTarget=TwoHandAim::Position(desired);
             const auto current=TwoHandAim::Position(bones[arm[h][2]]);
-            if(!Limb(bones,arm[h],current+(TwoHandAim::Position(desired)-current)*influence,right*(h?1.f:-1.f)*.5f-forward*.3f-Vector(0,0,1),reach,autoReach))return false;
+            const float upperFactor=upperScale?std::clamp(upperScale[h],.5f,1.5f):1,lowerFactor=forearmScale?std::clamp(forearmScale[h],.5f,1.5f):1;
+            if(!std::isfinite(upperFactor)||!std::isfinite(lowerFactor))return false;
+            const bool lengths=upperFactor!=1||lowerFactor!=1;
+            const float upperLength=sqrtf((TwoHandAim::Position(bones[arm[h][1]])-TwoHandAim::Position(bones[arm[h][0]])).LengthSqr())*reach*upperFactor;
+            const float lowerLength=sqrtf((current-TwoHandAim::Position(bones[arm[h][1]])).LengthSqr())*reach*lowerFactor;
+            const auto pole=right*(h?1.f:-1.f)*.5f-forward*.3f-Vector(0,0,1),target=current+(TwoHandAim::Position(desired)-current)*influence;
+            if(lengths?!ArmSegments(bones,arm[h],target,pole,upperLength,lowerLength,autoReach):!Limb(bones,arm[h],target,pole,reach,autoReach))return false;
             if(palmAnchor)for(int attempt=0;attempt<6;++attempt) {
                 auto axis=TwoHandAim::Position(bones[arm[h][2]])-TwoHandAim::Position(bones[arm[h][1]]);if(!TwoHandAim::Unit(axis))break;
                 Vector offset;for(int r=0;r<3;++r)offset[r]=(desired[r][0]*gripLocal[h].x+desired[r][1]*gripLocal[h].y+desired[r][2]*gripLocal[h].z)*palmDepth;
                 offset=(offset*wristScale+axis*(TwoHandAim::Dot(offset,axis)*(1-wristScale)))*handScale;
                 const auto target=gripTarget-offset;
                 if((target-TwoHandAim::Position(bones[arm[h][2]])).LengthSqr()<.000001f)break;
-                if(!Limb(bones,arm[h],target,right*(h?1.f:-1.f)*.5f-forward*.3f-Vector(0,0,1),1,autoReach))return false;
+                if(lengths?!ArmSegments(bones,arm[h],target,pole,upperLength,lowerLength,autoReach):!Limb(bones,arm[h],target,pole,1,autoReach))return false;
             }
             auto wrist=desired;const auto position=TwoHandAim::Position(bones[arm[h][2]]);
             for(int r=0;r<3;++r)wrist[r][3]=position[r];
-            if(wristTwist[h]>=0)PoseTwist::Distribute(bones[wristTwist[h]],bones[arm[h][2]],wrist,position-TwoHandAim::Position(bones[arm[h][1]]),twistFraction);
+            if(!deferTwist&&wristTwist[h]>=0)PoseTwist::Distribute(bones[wristTwist[h]],bones[arm[h][2]],wrist,position-TwoHandAim::Position(bones[arm[h][1]]),twistFraction);
             ReanchorBranch(bones,arm[h][2],wrist);
             Curl(bones,h,curls?curls[h]:nullptr,gripping[h],fingerGain,gripFloors?gripFloors[h]:.5f,thumbExtension);
         }

@@ -2,10 +2,20 @@
 #include "sigscanner.h"
 #include "portalpose.h"
 #include "twohandaim.h"
+#include "carryprofile.h"
 namespace NativePhysics {
+inline bool HeldAcrossPortal(void* serverPlayer,bool layoutVerified=false) {
+    // Verified CGrabController::UpdateObject (server+468300): 12c1 is a
+    // CPortal_Player field, NOT a field in the grab-controller allocation.
+    const auto base=reinterpret_cast<uintptr_t>(serverPlayer);
+    if(!layoutVerified||!base||base>UINTPTR_MAX-CarryProfile::PlayerAcrossOffset)return true;
+    const auto at=base+CarryProfile::PlayerAcrossOffset;
+    return !SigScanner::IsReadable(at,1)||*reinterpret_cast<const unsigned char*>(at)!=0;
+}
 struct Binding {
     uintptr_t setTarget=0,detach=0,getAttached=0;const uintptr_t* entries=nullptr;
     uintptr_t shutdownPickup=0,pickupTable=0;
+    bool portalCarryLayout=false;
     static Binding Resolve(uintptr_t server) {
         Binding out;
         auto match=[&](size_t at,const unsigned char* bytes,size_t size){return server&&SigScanner::IsReadable(server+at,size)&&!memcmp(reinterpret_cast<void*>(server+at),bytes,size);};
@@ -14,11 +24,12 @@ struct Binding {
         const unsigned char attached[]={0x8b,0x91,0x50,0x20,0,0,0x83,0xfa,0xff,0x74,0x1d,0xa1};
         const unsigned char serial[]={0x8b,0xca,0x81,0xe1,0xff,0x0f,0,0,0xc1,0xea,0x0c,0x03,0xc9,0x39,0x54,0xc8,0x08,0x75,0x05,0x8b,0x44,0xc8,0x04,0xc3,0x33,0xc0,0xc3};
         const unsigned char ret[]={0xc2,0x08,0};
-        if(!match(0x466300,target,sizeof(target))||!match(0x466383,ret,sizeof(ret))
+        if(!CarryProfile::Verify(match)||!match(0x466300,target,sizeof(target))||!match(0x466383,ret,sizeof(ret))
             ||!match(0x45fed0,detach,sizeof(detach))||!match(0x463060,attached,sizeof(attached))||!match(0x463070,serial,sizeof(serial)))return out;
         uintptr_t global=0;memcpy(&global,reinterpret_cast<void*>(server+0x46306c),4);
         if(global!=server+0x66c9fc||!SigScanner::IsReadable(global,4))return out;
         out={server+0x466300,server+0x45fed0,server+0x463060,reinterpret_cast<const uintptr_t*>(global)};
+        out.portalCarryLayout=true;
         const unsigned char shutdown[]={0x55,0x8b,0xec,0x83,0xec,0x10,0x53,0x56,0x57,0x8b,0xf9,0x8b,0x87,0x88,0x23,0,0};
         const unsigned char detachCall[]={0x8d,0x8f,0x38,3,0,0,0xe8,0x35,0x99,0xff,0xff,0x8b,0x97,0xc8,0x23,0,0};
         if(match(0x466520,shutdown,sizeof(shutdown))&&match(0x466590,detachCall,sizeof(detachCall))) {

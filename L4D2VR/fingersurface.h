@@ -2,17 +2,29 @@
 #include "handpose.h"
 #include "fingerrange.h"
 #include "twohandaim.h"
+#include "gunshape.h"
 namespace FingerSurface {
 struct Shape {
     matrix3x4_t frame{};Vector radii{1,1,1};bool gun=false;
+    bool frontValid=false;matrix3x4_t frontFrame{};
+    GunShape::Bounds Bounds()const{
+        if(!frontValid)return GunShape::HousingBounds;
+        const auto relative=HandPose::Concat(HandPose::InverseRigid(frame),frontFrame);GunShape::Bounds bounds{};
+        for(int c=0;c<3;++c){bounds.low[c]=1e20f;bounds.high[c]=-1e20f;}
+        for(size_t i=0;i<GunShape::Housing.size();++i){const auto& capsule=GunShape::Housing[i];
+            for(int end=0;end<2;++end){Vector p=GunShape::Start(capsule)+(end?GunShape::Axis(capsule):Vector(0,0,0));
+                if(i>=2)p=TwoHandAim::Position(HandPose::Concat(relative,HandPose::Frame({1,0,0},{0,1,0},{0,0,1},p)));
+                for(int c=0;c<3;++c){bounds.low[c]=std::min(bounds.low[c],p[c]-capsule.radius);bounds.high[c]=std::max(bounds.high[c],p[c]+capsule.radius);}}
+        }for(int c=0;c<3;++c){bounds.low[c]-=.02f;bounds.high[c]+=.02f;}return bounds;
+    }
     float Distance(Vector world) const {
         const auto delta=world-TwoHandAim::Position(frame);
         const Vector p{TwoHandAim::Dot(delta,TwoHandAim::Axis(frame,0)),TwoHandAim::Dot(delta,TwoHandAim::Axis(frame,1)),TwoHandAim::Dot(delta,TwoHandAim::Axis(frame,2))};
         if(gun){
-            // Conservative authored contact proxy for the housing/underside.
-            // It has no moving claws, player collision or world force body.
-            auto capsule=[&](Vector a,Vector b,float radius){const auto d=b-a;const float t=std::clamp(TwoHandAim::Dot(p-a,d)/d.LengthSqr(),0.f,1.f);return sqrtf((p-a-d*t).LengthSqr())-radius;};
-            return std::min(capsule({.15f,2.7f,5.7f},{.15f,2.7f,16.5f},3.25f),capsule({.15f,.1f,2.8f},{.15f,.8f,5.8f},1.15f));
+            if(frontValid){const auto d=world-TwoHandAim::Position(frontFrame);
+                const Vector q{TwoHandAim::Dot(d,TwoHandAim::Axis(frontFrame,0)),TwoHandAim::Dot(d,TwoHandAim::Axis(frontFrame,1)),TwoHandAim::Dot(d,TwoHandAim::Axis(frontFrame,2))};
+                return std::min({GunShape::Distance(p,GunShape::Housing[0]),GunShape::Distance(p,GunShape::Housing[1]),GunShape::Distance(q,GunShape::Housing[2]),GunShape::Distance(q,GunShape::Housing[3])});}
+            return GunShape::Distance(p);
         }
         const Vector r{std::max(.1f,radii.x),std::max(.1f,radii.y),std::max(.1f,radii.z)};
         const float n=sqrtf(p.x*p.x/(r.x*r.x)+p.y*p.y/(r.y*r.y)+p.z*p.z/(r.z*r.z));

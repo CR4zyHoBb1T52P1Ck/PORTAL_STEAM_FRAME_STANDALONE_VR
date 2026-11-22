@@ -9,6 +9,7 @@ from pathlib import Path
 from vpk_index import entries,read
 from complete_portal_gun import complete
 from generate_native_hands import generate
+from generate_gunshell51 import generate as gun_shell
 
 def build(game,output):
     game=Path(game);output=Path(output)
@@ -24,11 +25,13 @@ def build(game,output):
     def model(name):return tuple(source[f'models/weapons/{name}.{ext}'] for ext in ('mdl','vvd','dx90.vtx'))
     gun,gun_receipt=complete(model('v_portalgun'),model('w_portalgun'))
     hands,hands_receipt=generate(model('v_portalgun'),model('v_hands'))
+    shell,shell_receipt=gun_shell(gun)
     # All validation finishes before an output folder is created.
     target=output/'models/weapons';target.mkdir(parents=True)
     for name,files in (('v_portalgun',gun),('v_hands',hands)):
         for ext,data in zip(('mdl','vvd','dx90.vtx'),files):(target/(name+'.'+ext)).write_bytes(data)
-    receipt=dict(gun=gun_receipt,hands=hands_receipt,input_sha256={k:hashlib.sha256(v).hexdigest() for k,v in source.items()},
+    (output/'gun-shell51.bin').write_bytes(shell)
+    receipt=dict(shell=shell_receipt,gun=gun_receipt,hands=hands_receipt,input_sha256={k:hashlib.sha256(v).hexdigest() for k,v in source.items()},
         output_sha256={str(p.relative_to(output)).replace('\\','/'):hashlib.sha256(p.read_bytes()).hexdigest() for p in target.iterdir()},
         game_launched=False,original_install_changed=False)
     (output/'generation.json').write_text(json.dumps(receipt,indent=2)+'\n');return receipt

@@ -2,6 +2,25 @@
 #include "sigscanner.h"
 
 namespace NativePose {
+inline uintptr_t PortalGunEffectsDraw(uintptr_t client){
+    // Retained owned-client evidence: void thiscall(weapon,bool worldModel),
+    // sprite array at984, loop calls verified GetEffectParameters, RET4.
+    const unsigned char entry[]={0x55,0x8b,0xec,0x83,0xec,0x1c,0x53,0x8b,0xd1,0x33,0xdb,0x8b,0x4d,0x08,0x56,0x57,0x89,0x55,0xfc,0x8d,0xba,0x84,0x09,0,0};
+    const unsigned char tail[]={0x5f,0x5e,0x5d,0xc2,0x04,0};
+    if(!client||!SigScanner::IsReadable(client+0x24b490,sizeof(entry))||!SigScanner::IsReadable(client+0x24b591,sizeof(tail))
+        ||memcmp(reinterpret_cast<void*>(client+0x24b490),entry,sizeof(entry))||memcmp(reinterpret_cast<void*>(client+0x24b591),tail,sizeof(tail)))return 0;
+    return client+0x24b490;
+}
+struct ViewmodelDepthBinding {uintptr_t target=0,caller=0;};
+inline ViewmodelDepthBinding ViewmodelDepthClear(uintptr_t client) {
+    // Owned retail DrawViewModels: query -> either ClearBuffers(false,true,false)
+    // or DepthRange(0,.1). Only the query at this exact call site may be changed.
+    const unsigned char entry[]={0xe8,0x5b,0xb8,0xe9,0xff,0x80,0xb8,0xa8,0x15,0,0,0,0x75,0x2d,0x8b,0x90,0x58,0x16,0,0,0x83,0xfa};
+    const unsigned char call[]={0xe8,0x19,0x91,0x04,0,0x8b,0x75,0xcc,0x84,0xc0,0xd9,0xee,0x8b,0xce,0x0f,0x94,0xc0,0x88,0x45,0x0f,0x84,0xc0,0x8b,0x06,0x75,0x0d,0x6a,0,0x6a,1,0x6a,0,0xdd,0xd8,0xff,0x50,0x30};
+    if(!client||!SigScanner::IsReadable(client+0x229d80,sizeof(entry))||!SigScanner::IsReadable(client+0x1e0c62,sizeof(call))
+        ||memcmp(reinterpret_cast<void*>(client+0x229d80),entry,sizeof(entry))||memcmp(reinterpret_cast<void*>(client+0x1e0c62),call,sizeof(call)))return {};
+    return {client+0x229d80,client+0x1e0c67};
+}
 inline uintptr_t PortalGunEffectParameters(uintptr_t client) {
     // Installed Portal: six stack arguments (index, color, size, material,
     // position, worldModel); the first-person branch formats position for FOV.

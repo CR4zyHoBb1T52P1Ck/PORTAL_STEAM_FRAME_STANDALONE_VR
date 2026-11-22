@@ -21,6 +21,8 @@ inline matrix3x4_t SourceSpace(const float (&m)[3][4]) {
 struct Origin {
     matrix3x4_t previous{};
     bool ready=false;
+    float translationMeters=0,yawDegrees=0;
+    bool Significant()const{return translationMeters>.02f||yawDegrees>.5f;}
     bool Update(const matrix3x4_t& frame,bool enabled,Vector& center,float& yaw) {
         for(int r=0;r<3;++r) for(int c=0;c<4;++c)
             if(!std::isfinite(frame[r][c])) return false;
@@ -47,6 +49,7 @@ struct Origin {
         // Keep sub-threshold changes in the baseline until they accumulate;
         // otherwise slow origin drift is silently discarded every frame.
         previous=frame;
+        translationMeters=sqrtf(translation.LengthSqr());yawDegrees=fabsf(turn);
         center=TransformPoint(delta,center);
         yaw=std::remainder(yaw-turn,360.0f);
         return true;

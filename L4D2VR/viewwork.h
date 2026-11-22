@@ -5,6 +5,7 @@ namespace ViewWork {
 // are deliberately not labelled portal-only without a native pass identity.
 struct Frame {
     unsigned secondary=0,maxDepth=0,rebases=0,cacheHits=0;float bodyMs=0;
+    unsigned modelDraws=0,headerChecks=0,softProbesSkipped=0,softCandidates=0;
     void View(bool primary,unsigned depth){if(!primary)++secondary;maxDepth=std::max(maxDepth,depth);}
 };
 }

@@ -5,6 +5,8 @@
 #include "gungrab.h"
 #include "menuimage.h"
 #include "holsterfit.h"
+#include "mirrorgeometry.h"
+#include "interactionpolish.h"
 namespace {
 matrix3x4_t MenuMatrix(const vr::HmdMatrix34_t& source) {matrix3x4_t out;std::memcpy(&out,&source,sizeof(out));return out;}
 vr::HmdMatrix34_t OpenVrMatrix(const matrix3x4_t& source) {vr::HmdMatrix34_t out;std::memcpy(&out,&source,sizeof(out));return out;}
@@ -29,9 +31,14 @@ bool VR::SaveGraphicsSettings() {
         return true;
     } catch(const std::exception& error){PortalVrLog("VR settings save failed: %s",error.what());return false;}
 }
+bool VR::CanReuseEyeMirror() const {
+    return MirrorGeometry::Select(m_RenderWindow!=0,m_Graphics.mirrorReuseEye,m_Graphics.creatorCamera,
+        m_EyeMirrorFailed,m_Game&&m_Game->IsInGame(),!m_Game||m_Game->IsCursorVisible(),m_GraphicsOpen,m_SystemFocus.focused);
+}
 void VR::ApplyGraphicsSettings() {
     if(m_Graphics.leftHanded!=m_LeftHanded)HandleSettingsCommand(m_Graphics.leftHanded?"portal1vr_hand_left":"portal1vr_hand_right");
     m_RenderWindow=m_Graphics.mirror?1:0;m_SnapTurning=m_Graphics.snap;m_SnapTurnAngle=m_Graphics.snapAngle;
+    if(!m_Graphics.mirrorReuseEye)m_EyeMirrorFailed=false;
     m_TurnSpeed=m_Graphics.turnDegrees/1000;m_FirstPersonBody=m_Graphics.body;m_FirstPersonBodyHideUpper=m_Graphics.hideUpper;
     m_FirstPersonBodyBackOffset=m_Graphics.bodyBack;m_LeftHandGunGrip=m_Graphics.support;m_6DOF=m_Graphics.roomscale;
     m_AutoCalibration=m_Graphics.autoCalibration;m_AimMode=m_Graphics.aim;
@@ -248,6 +255,9 @@ void VR::ChangeGraphicsSetting(int row,int direction) {
         ControllerHaptic(selected.target,m_Graphics.grabHapticStrength,m_Graphics.hapticDurationMS/1000,m_Graphics.hapticFrequency,"user-test");
         m_GraphicsStatus="Haptic requested. Binding and result saved silently.";break;
     case VrMenu::CreatorCommand:CreatorAction(selected.target);break;
+    case VrMenu::SaveImageBaseline:ImageBaseline(false);break;
+    case VrMenu::RestoreImageBaseline:ImageBaseline(true);break;
+    case VrMenu::SceneBookmark:m_GraphicsStatus=m_SceneBookmark.Toggle()?"Bookmark armed: close menus to capture a gameplay frame. Select again to cancel.":"Scene bookmark cancelled.";break;
     case VrMenu::Resume:CloseVrMenus(true);return;
     case VrMenu::Restart:RequestPortalRestart();return;
     case VrMenu::Recenter:ResetPosition();SetMenuPlacement();m_GraphicsStatus="Headset and menu recentered.";break;
@@ -346,15 +356,24 @@ void VR::UpdateGraphicsMenu() {
             const auto& target=m_UpscaleReady?m_VKUpscaledLeft.m_VulkanData:image;
             output="Output "+std::to_string(target.m_nWidth)+" x "+std::to_string(target.m_nHeight)+(m_UpscaleReady?"  |  Mode "+std::to_string(m_Graphics.upscaler):"  |  Native")+(m_ActiveLegacyEffects?"  |  Legacy effects":"  |  Direct eye render");
         } else if(m_MenuPage==VrMenu::Effects)output="Bloom / motion blur require legacy effects. Legacy can soften VR.";
+        else if(m_MenuPage==VrMenu::PortalPerformance)output="Last rendered view: "+std::to_string(m_LastSecondaryViews)+" secondary | Eye CPU "+std::to_string(int(m_LastEyeRenderMs*10)/10.f)+"ms | Body "+std::to_string(int(m_LastBodyBuildMs*10)/10.f)+"ms";
         else if(m_MenuPage==VrMenu::Gun)output="Transfer: hold both grips, then release the gun hand. Movement stays put.";
         else if(m_MenuPage==VrMenu::Support)output="Squeeze anywhere under the gun. Pull away to release after a handoff.";
         else if(m_MenuPage==VrMenu::Holster)output="Bring gun hand over a shoulder and squeeze. Squeeze there again to draw.";
         else if(m_MenuPage==VrMenu::Feedback)output="Use left/right test buttons. Strength 0 silences all weapon pulses.";
         else if(m_MenuPage==VrMenu::Arms)output="Hand visibility and placement. Native body and IK has optional body solving.";
-        else if(m_MenuPage==VrMenu::Crosshair)output="Trigger colors stay on the same physical controller across gun handoffs.";
+        else if(m_MenuPage==VrMenu::Crosshair)output="Last-shot color applies to dot / cross / ring. Original artwork uses Portal's HUD.";
         else if(m_MenuPage==VrMenu::Fingers)output="Gun grip is a curl floor; tracked fingers can curl further. Thumb pose is optional.";
-        else if(m_MenuPage==VrMenu::Jiggle)output="Small damped visual body response only. Bone positions and movement stay fixed.";
-        else if(m_MenuPage==VrMenu::Creator||m_MenuPage==VrMenu::CreatorCamera)output="Spectator camera renders an extra desktop view; headset tracking stays unchanged.";
+        else if(m_MenuPage==VrMenu::Support)output=m_Graphics.firmSupportGrip?"Firm grip locks the contacted hand pose. Release grip or pull away; legacy offsets are bypassed.":"Legacy grip enabled. Snap, slide and hand placement controls apply.";
+        else if(m_MenuPage==VrMenu::GripZonePage)output="Firm: shell capture and pull-away distances are independent. Zone position/length applies to legacy grip.";
+        else if(m_MenuPage==VrMenu::GunSurface)output="Last-shot colour changes only the top indicator. Window radius controls its visible opening.";
+        else if(m_MenuPage==VrMenu::ArmLengths)output="Solved cm: L "+std::to_string(int(m_LastUpperCM[0]))+" upper / "+std::to_string(int(m_LastForearmCM[0]))+" forearm | R "+std::to_string(int(m_LastUpperCM[1]))+" / "+std::to_string(int(m_LastForearmCM[1]))+". Reach correction may adjust the upper arm.";
+        else if(m_MenuPage==VrMenu::SkinQualification)output="Original skin remains installed. Neutral mode is the first gate for a separate qualified skin.";
+        else if(m_MenuPage==VrMenu::ForearmRoll)output="Hand alignment stays fixed. Separate left/right shares compensate for native skin differences.";
+        else if(m_MenuPage==VrMenu::Jiggle)output="This trial uses the original skin. Localized jiggle needs a separately qualified skin asset.";
+        else if(m_MenuPage==VrMenu::Creator||m_MenuPage==VrMenu::CreatorCamera)output="Cinematic cameras render an extra view. Head capture can reuse an eye image.";
+        else if(m_MenuPage==VrMenu::Capture)output=m_EyeMirrorFailed?"Eye copy failed; using the separate scene. Toggle eye reuse off/on to retry.":"Eye reuse captures the headset image. Follow/orbit/free cameras use a separate view.";
+        else if(m_MenuPage==VrMenu::VisualComparison)output="Save baseline first. Use the same scene; restart after preset changes. Body settings stay yours.";
         else if(m_MenuPage==VrMenu::Replay)output="Native demos replay the world. Injected VR hand/body poses are not recorded in demos yet.";
         else if(m_MenuPage==VrMenu::PhysicalContact)output="Controller swings push movable props. Native player/portal travel is not driven.";
         else if(m_MenuPage==VrMenu::TPose)output="Stand upright, arms sideways. Release triggers; hold BOTH for 1 second.";
@@ -477,6 +496,15 @@ matrix3x4_t VR::GetAvatarHandFrame(bool physicalLeft,bool contact) {
     auto result=GetPhysicalHandFrame(physicalLeft);
     const bool primaryLeft=(WeaponHand()==0)!=m_LeftHanded;
     const auto& g=m_Graphics;
+    if(contact&&g.firmSupportGrip&&m_OptionalSupportActive&&m_SupportLatch.valid&&physicalLeft!=primaryLeft&&!m_Weapon.stowed){
+        const auto controller=GetGunControllerFrame();const auto locked=m_SupportLatch.Resolve(controller);
+        if(g.animatedSupportGrip&&m_GunAnimation.valid){
+            const auto gun=HandPose::Concat(controller,m_GunFromController);
+            if(!m_AnimatedSupport.bound&&m_AnimatedSupport.pending)m_AnimatedSupport.Capture(HandPose::Concat(gun,m_GunAnimation.front),locked);
+            if(m_AnimatedSupport.bound)return m_AnimatedSupport.Resolve(HandPose::Concat(gun,m_GunAnimation.front));
+        }
+        return locked;
+    }
     if(m_OptionalSupportActive&&physicalLeft!=primaryLeft) {
         if(g.snapSupportHand) {
             const auto socket=HandPose::Concat(GetGunControllerFrame(),m_SupportFromController);
@@ -503,7 +531,21 @@ matrix3x4_t VR::GetAvatarHandFrame(bool physicalLeft,bool contact) {
         &&(physicalLeft!=m_LeftHanded)==(PropHand()==0)&&GetTickCount64()-m_PropVisualStamp<120&&InteractionAllowed()&&!PortalContactClearance())
         return HandPose::Concat(PortalPose::Frame(m_GrabControllerPos,m_GrabControllerAng),m_PropVisualRelative);
     const auto& touch=m_HandContact[physicalLeft?0:1];
-    if(contact&&g.handContact&&touch.valid&&touch.touching&&GetTickCount64()-touch.time<150&&InteractionAllowed())return touch.frame;
+    if(contact&&g.handContact&&touch.valid&&touch.touching&&GetTickCount64()-touch.time<150&&InteractionAllowed())result=touch.frame;
+    const bool gripping=physicalLeft==primaryLeft||m_OptionalSupportActive;
+    const bool tracked=m_ActionStateFresh&&((physicalLeft!=m_LeftHanded)?m_LeftControllerPose.isValid:m_RightControllerPose.isValid);
+    auto& gunTouch=m_GunHandContact[physicalLeft?0:1];
+    if(contact&&g.selfTouch&&g.handContact&&g.body&&g.bodyIK&&InteractionAllowed()&&!m_BodyCapture.active
+        &&(m_Weapon.stowed||!gripping)&&!PortalContactClearance())
+    {
+        result=InteractionPolish::OutsideTorso(result,GetViewOrigin(m_SetupOrigin),m_HmdForward,m_VRScale,g.controllerHands&&g.handAnchor==1);
+        result=InteractionPolish::OutsideHand(result,GetPhysicalHandFrame(!physicalLeft),m_VRScale,physicalLeft);
+    }
+    if(contact&&g.gunSurfacePose&&g.gun&&!m_Weapon.stowed&&m_PortalAimLastSeen&&physicalLeft!=primaryLeft
+        &&tracked&&m_SystemFocus.Allowed()&&!m_BodyCapture.active) {
+        FingerSurface::Shape shape;shape.gun=true;shape.frame=HandPose::Concat(GetGunControllerFrame(),m_GunFromController);m_GunAnimation.Shape(shape);
+        result=gunTouch.Resolve(result,shape,m_VRScale,g.controllerHands&&g.handAnchor==1,g.gunPalmGapMM);
+    }else if(contact)gunTouch.Reset();
     return result;
 }
 matrix3x4_t VR::GetCanonicalGunFrame() {
@@ -581,7 +623,7 @@ void VR::SnapshotContactPoints() {
 }
 void VR::UpdateCrosshair() {
     const auto& g=m_Graphics;if(!m_Overlay)return;
-    if(!g.crosshair||!InteractionAllowed()||m_Weapon.stowed||!g.gun||!WeaponTracked()) {
+    if(!g.crosshair||g.crosshair==4||!InteractionAllowed()||m_Weapon.stowed||!g.gun||!WeaponTracked()) {
         if(m_ReticleHandle)m_Overlay->HideOverlay(m_ReticleHandle);return;
     }
     if(!m_ReticleHandle) {
@@ -590,9 +632,13 @@ void VR::UpdateCrosshair() {
         m_Overlay->SetOverlayFlag(m_ReticleHandle,vr::VROverlayFlags_VisibleInDashboard,false);
         m_Overlay->SetOverlaySortOrder(m_ReticleHandle,30);
     }
-    const int key=g.crosshair+g.crosshairColor*8+int(g.crosshairOpacity)*64;const auto now=GetTickCount64();
+    const int color=Reticle::Color(g.crosshairColor,g.crosshairLastPortal,m_LastPortalShot.load(std::memory_order_relaxed));
+    const auto rgb=Reticle::TintRGB(color);
+    // Tint the existing white overlay; a shot never allocates or uploads a new texture.
+    m_Overlay->SetOverlayColor(m_ReticleHandle,float((rgb>>16)&255)/255,float((rgb>>8)&255)/255,float(rgb&255)/255);
+    const int key=g.crosshair+int(g.crosshairOpacity)*64;const auto now=GetTickCount64();
     if((key!=m_ReticleKey||!m_ReticleReady)&&!m_ReticlePending&&now>=m_ReticleRetry) {
-        const auto pixels=Reticle::Pixels(g.crosshair,g.crosshairColor,g.crosshairOpacity/100);
+        const auto pixels=Reticle::Pixels(g.crosshair,0,g.crosshairOpacity/100);
         const auto result=UploadOverlayFile(m_ReticleHandle,pixels,128,128,"aim-reticle");
         m_ReticleRetry=now+1000;m_ReticlePending=result==vr::VROverlayError_None;
         if(m_ReticlePending){m_ReticleKey=key;m_ReticleReady=false;}

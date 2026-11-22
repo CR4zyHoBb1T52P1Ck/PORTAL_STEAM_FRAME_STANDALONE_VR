@@ -74,7 +74,7 @@ namespace
 VR::VR(Game *game) 
 {
     m_Game = game;
-    PortalVrLog("VR::VR start");
+    PortalVrLog("VR::VR start build=Contact-55");
 
     vr::HmdError error = vr::VRInitError_None;
     m_System = vr::VR_Init(&error, vr::VRApplication_Scene);
@@ -142,6 +142,11 @@ VR::VR(Game *game)
         return;
     }
     ParseConfigFile();
+    char shellDirectory[MAX_PATH]{};
+    if(GetRuntimeBaseDirectory(shellDirectory,sizeof(shellDirectory))){
+        const bool loaded=m_GunShell.Load(std::filesystem::path(shellDirectory)/"VR"/"gun-shell51.bin");
+        PortalVrLog("Opaque gun mesh ready=%d parts=%zu triangles=%zu checksum=%d",loaded,m_GunShell.parts.size(),m_GunShell.triangles.size(),m_GunShell.checksum);
+    }
     m_ActiveLegacyEffects=m_Graphics.legacyEffects;
     const auto target=VrGraphics::ExplicitTarget(m_Graphics.eyeWidth,m_CropWidth,m_CropHeight);
     m_RenderWidth=target.width;m_RenderHeight=target.height;m_ActiveMsaa=m_AntiAliasing;
@@ -817,28 +822,51 @@ void VR::ProcessMenuInput() { UpdateMenuInteraction(); }
 bool VR::UpdateOptionalGunSupport(matrix3x4_t *target)
 {
     const int off=1-m_Weapon.hand;
-    const auto controller=m_OptionalSupportActive?GetGunControllerFrame():GetRawGunControllerFrame();
+    const auto controller=GetGunControllerFrame();
     const auto gun=HandPose::Concat(controller,m_GunFromController);
     const float unit=m_VRScale/100,scale=m_Graphics.gripZoneScale/100.f;
     GripZone::Shape shape;shape.length=m_Graphics.gripZoneLengthCM*unit*scale;
     shape.radius=m_Graphics.supportRadiusCM*unit*scale;
     shape.center={m_Graphics.gripZoneXCM*unit,-2.8f+m_Graphics.gripZoneYCM*unit,12+m_Graphics.gripZoneZCM*unit};
-    const auto hit=GripZone::Closest(gun,WeaponPosition(true),shape);
+    auto hit=GripZone::Closest(gun,WeaponPosition(true),shape);
+    const bool physicalLeft=(off==0)!=m_LeftHanded;
+    const bool palm=m_Graphics.controllerHands&&m_Graphics.handAnchor==1;
+    const auto rawHand=GetPhysicalHandFrame(physicalLeft);
+    FingerSurface::Shape shell;shell.gun=true;shell.frame=gun;m_GunAnimation.Shape(shell);
+    const auto palmPoint=TwoHandAim::Position(rawHand)+TwoHandAim::Axis(rawHand,0)*(palm?0:m_VRScale*.045f);
+    const float captureRadius=std::min(shape.radius,m_Graphics.supportCaptureCM*unit);
+    if(m_Graphics.firmSupportGrip){hit.distance=std::max(0.f,shell.Distance(palmPoint));hit.valid=std::isfinite(hit.distance);}
     const auto anchor=HandPose::Concat(controller,m_SupportFromController);
     const float distance=m_OptionalSupportActive?sqrtf((WeaponPosition(true)-TwoHandAim::Position(anchor)).LengthSqr()):hit.distance;
     const bool was=m_OptionalSupportActive;
     const bool enabled=m_LeftHandGunGrip&&m_IsVREnabled&&m_SystemFocus.Allowed()&&!m_GraphicsOpen&&!m_Game->IsCursorVisible()&&!m_Weapon.stowed&&m_PropHold.hand<0;
     const bool tracked=m_ActionStateFresh&&m_LeftControllerPose.isValid&&m_RightControllerPose.isValid
         &&(WeaponPosition(true)-WeaponPosition()).LengthSqr()>=m_VRScale*m_VRScale*.0036f;
-    m_OptionalSupportActive=m_OptionalGripState.Update(enabled,tracked,m_SupportLastSeen&&hit.valid,
-        !m_Weapon.blocked[off]&&m_GripPressed[off],distance,shape.radius,m_Graphics.gripHoldNear);
-    if(m_OptionalSupportActive&&(!was||m_Graphics.slideSupportGrip)) {
+    const bool pressed=!m_Weapon.blocked[off]&&m_GripPressed[off];
+    m_OptionalSupportActive=m_Graphics.firmSupportGrip?
+        SupportGrip49::Update(m_OptionalGripState,enabled,tracked,m_SupportLastSeen&&hit.valid,pressed,
+            hit.distance,captureRadius,distance,m_Graphics.supportReleaseCM*unit,m_Graphics.gripHoldNear):
+        m_OptionalGripState.Update(enabled,tracked,m_SupportLastSeen&&hit.valid,pressed,distance,shape.radius,m_Graphics.gripHoldNear);
+    if(m_Graphics.firmSupportGrip&&m_OptionalSupportActive&&!was){
+        const auto hand=SupportGrip::Surface(rawHand,shell,m_VRScale,palm,m_Graphics.gunPalmGapMM);
+        m_AnimatedSupport.Reset();
+        if(m_SupportLatch.Capture(controller,hand)){
+            const auto at=TwoHandAim::Position(hand)+TwoHandAim::Axis(hand,0)*(palm?0:m_VRScale*.045f);
+            m_AnimatedSupport.pending=m_Graphics.animatedSupportGrip&&GunAnimation::FrontClosest(shell,at);
+            if(m_AnimatedSupport.pending&&m_GunAnimation.valid)m_AnimatedSupport.Capture(HandPose::Concat(gun,m_GunAnimation.front),hand);
+            // Raw controller socket controls aim; corrected surface pose controls
+            // the visible hand. Matching them would jump the gun on acquisition.
+            m_SupportFromController=HandPose::Concat(HandPose::InverseRigid(GetRawGunControllerFrame()),GripZone::Point(WeaponPosition(true)));
+            PortalVrLog("Firm support captured hand=%d captureCM=%f releaseCM=%f front=%d pending=%d animation=%d",off,m_Graphics.supportCaptureCM,m_Graphics.supportReleaseCM,m_AnimatedSupport.bound,m_AnimatedSupport.pending,m_GunAnimation.valid);
+        }else m_OptionalSupportActive=m_OptionalGripState.active=false;
+    }
+    if(!m_Graphics.firmSupportGrip&&m_OptionalSupportActive&&(!was||m_Graphics.slideSupportGrip)) {
         m_ActiveGripGunLocal=hit.point;
         m_SupportFromController=HandPose::Concat(m_GunFromController,GripZone::Point(hit.point));
     }
-    if(!m_OptionalSupportActive)m_Weapon.transferSupport=false;
+    if(!m_OptionalSupportActive){m_Weapon.transferSupport=false;m_SupportLatch.Reset();m_AnimatedSupport.Reset();}
     if(target&&m_OptionalSupportActive)*target=GetAvatarHandFrame((off==0)!=m_LeftHanded);
-    if(m_GripHover[off].Update(enabled&&tracked&&m_SupportLastSeen&&hit.valid,hit.distance,shape.radius,GetTickCount64()))
+    if(m_GripHover[off].Update(enabled&&tracked&&m_SupportLastSeen&&hit.valid,hit.distance,m_Graphics.firmSupportGrip?captureRadius:shape.radius,GetTickCount64()))
         WeaponHaptic(off,.65f,m_Graphics.grabHover);
     if(was!=m_OptionalSupportActive) {
         PortalVrLog("Support grip active=%d hand=%d distance=%f radius=%f length=%f twoHand=%d",m_OptionalSupportActive,off,distance,shape.radius,shape.length,m_Graphics.twoHandAim);
@@ -878,7 +906,7 @@ void VR::UpdateWeaponHandling() {
     if(event==WeaponHandling::Transfer||event==WeaponHandling::Draw||event==WeaponHandling::Stow) {
         // Transfer adopts exactly the same receiver pose as shoulder draw.
         // A released former gun hand must not remain a virtual support anchor.
-        m_Weapon.transferSupport=false;m_OptionalSupportActive=false;
+        m_Weapon.transferSupport=false;m_OptionalSupportActive=false;m_SupportLatch.Reset();m_AnimatedSupport.Reset();
         m_OptionalGripState.active=false;m_OptionalGripState.wasPressed=true;
         if(event==WeaponHandling::Transfer) {
             WeaponHaptic(0,.8f,m_Graphics.transferHaptics);WeaponHaptic(1,.8f,m_Graphics.transferHaptics);
@@ -1325,11 +1353,11 @@ void VR::UpdateAutoCalibration()
     } else if(space==vr::TrackingUniverseRawAndUncalibrated) frame=PortalPose::Frame({0,0,0},{0,0,0});
     if(m_CalibrationOrigin.Update(frame,m_AutoCalibration && !m_CenterPending,m_Center,m_RotationOffset.y)) {
         m_HmdPosRelativeRawPrev=m_HmdPose.TrackedDevicePos-m_Center;
-        m_CameraCollisionOffset={0,0,0};
-        m_CalibrationDrift.Reset();
-        m_CalibrationStability.Reset();
-        m_CalibrationSuppressUntil=now+2000;
-        PortalVrLog("Auto calibration: preserved position, floor height and heading after tracking-origin change");
+        if(m_CalibrationOrigin.Significant()) {
+            m_CameraCollisionOffset={0,0,0};m_CalibrationDrift.Reset();m_CalibrationStability.Reset();m_CalibrationSuppressUntil=now+2000;
+        }
+        static uint64_t nextOriginAudit=0;
+        if(now>=nextOriginAudit){nextOriginAudit=now+3000;PortalVrLog("Auto calibration origin delta meters=%f yaw=%f contactReset=%d",m_CalibrationOrigin.translationMeters,m_CalibrationOrigin.yawDegrees,m_CalibrationOrigin.Significant());}
     }
     vr::InputAnalogActionData_t walk{};
     const bool moving=GetAnalogActionData(m_ActionWalk,walk) && walk.bActive && walk.x*walk.x+walk.y*walk.y>.36f;
@@ -1340,7 +1368,9 @@ void VR::UpdateAutoCalibration()
     bool eligible=m_AutoCalibration && m_6DOF && stable && !turning
         && m_Game->IsInGame() && !m_Game->IsCursorVisible() && now>=m_CalibrationSuppressUntil
         && player
-        && now-m_LastCarryUpdate>500 && moving && dt>0 && playerDelta.LengthSqr()<dt*dt
+        && now-m_LastCarryUpdate>500 && now-m_LastPhysicalPush>500
+        && !m_HandContact[0].touching&&!m_HandContact[1].touching&&!m_GunWallTouch
+        && moving && dt>0 && playerDelta.LengthSqr()<dt*dt
         && m_HmdPose.TrackedDeviceVel.LengthSqr()<.04f*.04f
         && Vector(m_HmdPose.TrackedDeviceAngVel.x,m_HmdPose.TrackedDeviceAngVel.y,m_HmdPose.TrackedDeviceAngVel.z).LengthSqr()<15.f*15.f
         && fabsf(m_HmdPose.TrackedDeviceAng.x)<25 && fabsf(m_HmdPose.TrackedDeviceAng.z)<25
@@ -2066,6 +2096,9 @@ void VR::ParseConfigFile()
     parseOrDefault("RenderWindow", m_RenderWindow, 0);
     if(userConfig.count("NativeModels")) parseOrDefault("NativeModels",m_NativeModels,false);
     const auto optional=[&](const char* key,auto& value) {if(userConfig.count(key))parseOrDefault(key,value,value);};
+    optional("DetailedGpuTiming",m_Graphics.detailedGpuTiming);optional("MirrorReuseEye",m_Graphics.mirrorReuseEye);
+    optional("MirrorEye",m_Graphics.mirrorEye);m_Graphics.mirrorEye=std::clamp(m_Graphics.mirrorEye,0,1);
+    optional("MirrorFit",m_Graphics.mirrorFit);m_Graphics.mirrorFit=std::clamp(m_Graphics.mirrorFit,0,1);
     optional("RenderScalePercent",m_Graphics.scale);
     optional("SpatialUpscaler",m_Graphics.upscaler);m_Graphics.upscaler=std::clamp(m_Graphics.upscaler,0,3);
     optional("MotionBlur",m_Graphics.blur);optional("Bloom",m_Graphics.bloom);

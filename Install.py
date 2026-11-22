@@ -53,6 +53,7 @@ def install(game,dry=False):
   output=Path(temp)/'generated';build(game,output)
   for p in (output/'models').rglob('*'):
    if p.is_file():updates['portal/custom/portal1vr/'+p.relative_to(output).as_posix()]=p.read_bytes()
+  updates['bin/VR/gun-shell51.bin']=(output/'gun-shell51.bin').read_bytes()
  for name in updates:safe(game,name)
  if dry:return {'status':'validated-dry-run','files':len(updates),'game_changed':False,'game_launched':False}
  active()

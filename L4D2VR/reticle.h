@@ -2,6 +2,8 @@
 #include "twohandaim.h"
 #include <vector>
 namespace Reticle {
+inline int Color(int fixed,bool follow,int lastShot){return follow&&lastShot>=0?(lastShot?2:1):std::clamp(fixed,0,4);}
+inline uint32_t TintRGB(int color){const uint32_t colors[]={0xffffff,0x40dfff,0xff9c40,0x70ff80,0xff70ef};return colors[std::clamp(color,0,4)];}
 inline std::vector<uint32_t> Pixels(int shape,int color,float opacity) {
     const uint32_t colors[]={0xffffff,0x40dfff,0xff9c40,0x70ff80,0xff70ef};
     const auto alpha=uint32_t(std::clamp(opacity,0.f,1.f)*255);

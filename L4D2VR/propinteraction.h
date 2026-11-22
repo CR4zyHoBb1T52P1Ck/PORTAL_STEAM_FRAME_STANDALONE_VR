@@ -1,6 +1,7 @@
 #pragma once
 #include "portalpose.h"
 #include "twohandaim.h"
+#include "interactionpolish.h"
 #include <array>
 namespace PropInteraction {
 inline bool Valid(const matrix3x4_t& m) {for(int r=0;r<3;++r)for(int c=0;c<4;++c)if(!std::isfinite(m[r][c]))return false;return true;}
@@ -43,8 +44,8 @@ struct Motion {
     }
 };
 struct Carry {
-    void* controller=nullptr;void* entity=nullptr;int mode=-1,hand=-1;matrix3x4_t relative{},palmFromObject{};bool surface=false;Motion motion;
-    void Reset(){controller=entity=nullptr;mode=hand=-1;surface=false;motion.Reset();}
+    void* controller=nullptr;void* entity=nullptr;int mode=-1,hand=-1;matrix3x4_t relative{},palmFromObject{};bool surface=false;Motion motion;InteractionPolish::Smooth smoothing;
+    void Reset(){controller=entity=nullptr;mode=hand=-1;surface=false;motion.Reset();smoothing.Reset();}
     bool New(void* c,void* e,int m,int h)const{return c!=controller||e!=entity||m!=mode||h!=hand;}
     void Surface(Vector worldContact,const matrix3x4_t& handPose,const matrix3x4_t& object,float gap) {
         if(!TwoHandAim::Finite(worldContact)||!Valid(handPose)||!Valid(object))return;
@@ -53,7 +54,7 @@ struct Carry {
         auto normal=PortalPose::Position(relative);if(TwoHandAim::Unit(normal))for(int r=0;r<3;++r)relative[r][3]+=normal[r]*std::clamp(gap,0.f,2.f);
         const auto target=HandPose::Concat(handPose,relative);palmFromObject=HandPose::Concat(HandPose::InverseRigid(target),handPose);surface=true;
     }
-    matrix3x4_t Target(void* c,void* e,int m,int h,double now,const matrix3x4_t& handPose,const matrix3x4_t& object,float units,float palmDistance=-1) {
+    matrix3x4_t Target(void* c,void* e,int m,int h,double now,const matrix3x4_t& handPose,const matrix3x4_t& object,float units,float palmDistance=-1,float smoothMS=0,Vector reference={0,0,0}) {
         if(c!=controller||e!=entity||m!=mode||h!=hand){Reset();controller=c;entity=e;mode=m;hand=h;relative=HandPose::Concat(HandPose::InverseRigid(handPose),object);
             if(std::isfinite(palmDistance)&&palmDistance>=0){
                 auto direction=PortalPose::Position(relative);if(!TwoHandAim::Unit(direction))direction={1,0,0};
@@ -61,7 +62,8 @@ struct Carry {
                 for(int r=0;r<3;++r)relative[r][3]=offset[r];
             }
         }
-        motion.Push(now,handPose,units);return HandPose::Concat(handPose,relative);
+        motion.Push(now,handPose,units);const auto target=HandPose::Concat(handPose,relative);
+        return smoothMS>0?smoothing.Step(target,reference,now,units,smoothMS):target;
     }
 };
 }

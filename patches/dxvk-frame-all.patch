@@ -1,16 +1,17 @@
 diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
-index b4bbd4a..cdb43cb 100644
+index b4bbd4a..5fd8178 100644
 --- a/src/d3d9/d3d9_device.cpp
 +++ b/src/d3d9/d3d9_device.cpp
-@@ -26,6 +26,7 @@
+@@ -26,6 +26,8 @@
  
  #include "L4D2VR/game.h"
  #include "L4D2VR/vr.h"
 +#include "L4D2VR/debuglog.h"
++#include "L4D2VR/renderpolicy.h"
  #include "L4D2VR/sdk/sdk.h"
  #include "d3d9_vr.h"
  
-@@ -379,11 +380,8 @@ namespace dxvk {
+@@ -379,11 +381,8 @@ namespace dxvk {
  
  
    HRESULT STDMETHODCALLTYPE D3D9DeviceEx::Reset(D3DPRESENT_PARAMETERS* pPresentationParameters) {
@@ -24,7 +25,7 @@ index b4bbd4a..cdb43cb 100644
  
      D3D9DeviceLock lock = LockDevice();
  
-@@ -528,25 +526,25 @@ namespace dxvk {
+@@ -528,25 +527,25 @@ namespace dxvk {
            if (texID == VR::Texture_LeftEye)
            {
                textureTarget = &g_Game->m_VR->m_VKLeftEye;
@@ -54,7 +55,7 @@ index b4bbd4a..cdb43cb 100644
                g_D3DVR9->GetVRDesc(g_Game->m_VR->m_D9BlankSurface, &texDesc);
            }
  
-@@ -1313,6 +1311,30 @@ namespace dxvk {
+@@ -1313,6 +1312,30 @@ namespace dxvk {
      if (unlikely(rt != nullptr && !(texInfo->Desc()->Usage & D3DUSAGE_RENDERTARGET)))
        return D3DERR_INVALIDCALL;
  
@@ -85,7 +86,7 @@ index b4bbd4a..cdb43cb 100644
      if (RenderTargetIndex == 0) {
        auto rtSize = rt->GetSurfaceExtent();
  
-@@ -1683,16 +1705,24 @@ namespace dxvk {
+@@ -1683,16 +1706,24 @@ namespace dxvk {
  
    HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetViewport(const D3DVIEWPORT9* pViewport) {
      
@@ -117,11 +118,31 @@ index b4bbd4a..cdb43cb 100644
      if (unlikely(ShouldRecord()))
        return m_recorder->SetViewport(pViewport);
  
-@@ -3547,17 +3577,52 @@ namespace dxvk {
+@@ -3539,7 +3570,9 @@ namespace dxvk {
+           HWND hDestWindowOverride,
+     const RGNDATA* pDirtyRegion,
+           DWORD dwFlags) {
+-    
++    // Optional eye reuse copies only the desktop image. Native UI/cinematic
++    // views are fenced in CanReuseEyeMirror; headset rendering stays intact.
++    if(g_D3DVR9){g_D3DVR9->ProfileScene(4);g_D3DVR9->CopyEyeMirror();g_D3DVR9->ProfileScene(5);}
+ 	HRESULT result = m_implicitSwapchain->Present(
+     pSourceRect,
+     pDestRect,
+@@ -3547,17 +3580,60 @@ namespace dxvk {
      pDirtyRegion,
      dwFlags);
  
 -    if (g_Game && g_Game->m_VR && g_Game->m_VR->m_CreatedVRTextures) {
+-      ResolveImage(GetCommonTexture(g_Game->m_VR->m_D9LeftEyeSurface));
+-      ResolveImage(GetCommonTexture(g_Game->m_VR->m_D9RightEyeSurface));
+-    }
+-	  
+-	g_D3DVR9->WaitDeviceIdle();
+-    
+-    if (g_Game && g_Game->m_VR)
+-    {
+-        g_Game->m_VR->Update();
 +    // Opt-in render diagnostics; no GPU readback during normal play.
 +    static const bool dumpEyeTextures = strstr(GetCommandLineA(), "-portalvr-debug-textures") != nullptr;
 +    static unsigned dumpFrame = 0;
@@ -153,30 +174,81 @@ index b4bbd4a..cdb43cb 100644
 +      IDirect3DSurface9 *back=nullptr; GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,&back);
 +      dumpSurface(back,"portalvr-desktop.bmp"); if(back) back->Release();
 +    }
-+    if (g_Game && g_Game->m_VR && g_Game->m_VR->m_CreatedVRTextures
-+        && g_Game->m_VR->m_D9LeftEyeSurface && g_Game->m_VR->m_D9RightEyeSurface) {
-       ResolveImage(GetCommonTexture(g_Game->m_VR->m_D9LeftEyeSurface));
-       ResolveImage(GetCommonTexture(g_Game->m_VR->m_D9RightEyeSurface));
-     }
- 	  
--	g_D3DVR9->WaitDeviceIdle();
--    
--    if (g_Game && g_Game->m_VR)
--    {
--        g_Game->m_VR->Update();
 +    if (g_D3DVR9 && g_Game && g_Game->m_VR && g_Game->m_VR->m_IsInitialized) {
++      g_D3DVR9->ProfileScene(6);
 +      const auto upscaleResult=g_D3DVR9->UpscaleEyes();
++      g_D3DVR9->ProfileScene(7);
 +      static HRESULT lastUpscale=S_FALSE;
 +      if(upscaleResult!=lastUpscale) {Logger::info(str::format("SGSR result ",upscaleResult));lastUpscale=upscaleResult;}
 +      // BeginTextureSubmission drains render/resolve/upscale plus layout barriers
 +      // together. An earlier full-device idle duplicated the same frame wait.
++    }
++    // Upscale sampling performs its own resolves in BindTexture. Do not also
++    // resolve both originals unless those originals are about to be submitted.
++    if(g_D3DVR9)g_D3DVR9->ProfileScene(8);
++    if(g_Game&&g_Game->m_VR){
++      const auto* vr=g_Game->m_VR;
++      if(RenderPolicy::ResolveNativeEyes(vr->m_CreatedVRTextures,vr->m_RenderedNewFrame,vr->m_UpscaleReady,vr->m_Graphics.upscaler)
++          &&vr->m_D9LeftEyeSurface&&vr->m_D9RightEyeSurface){
++        ResolveImage(GetCommonTexture(vr->m_D9LeftEyeSurface));
++        ResolveImage(GetCommonTexture(vr->m_D9RightEyeSurface));
++      }
      }
++    if(g_D3DVR9)g_D3DVR9->ProfileScene(9);
 +
 +    UpdatePortalVr();
  	  
  	return result;
    }
-@@ -7159,6 +7224,17 @@ namespace dxvk {
+@@ -5709,6 +5785,13 @@ namespace dxvk {
+   }
+ 
+ 
++  void D3D9DeviceEx::SetVrModelSceneDepth(bool enabled,bool sprites) {
++    D3D9DeviceLock lock = LockDevice();
++    const bool oldSprites=m_vrModelDepth.sprites;
++    if(m_vrModelDepth.Set(enabled,sprites))m_flags.set(D3D9DeviceFlag::DirtyViewportScissor);
++    if(oldSprites!=m_vrModelDepth.sprites)m_flags.set(D3D9DeviceFlag::DirtyDepthStencilState);
++  }
++
+   void D3D9DeviceEx::BindViewportAndScissor() {
+     m_flags.clr(D3D9DeviceFlag::DirtyViewportScissor);
+ 
+@@ -5719,6 +5802,13 @@ namespace dxvk {
+     // but the viewport coordinates are aligned to the top-left
+     // corner so we can get away with flipping the viewport.
+     const D3DVIEWPORT9& vp = m_state.viewport;
++    // Apply at final GPU binding, after any material/state-block viewport
++    // changes. GetViewport and native state caches keep the unmodified values.
++    const auto modelDepth=m_vrModelDepth.Draw(vp.MinZ,vp.MaxZ);
++    if(m_vrModelDepth.active){
++      static unsigned logged=0;
++      if(logged++<12)PortalVrLog("Model scene depth GPU bind native=%f,%f effective=%f,%f target=%p",vp.MinZ,vp.MaxZ,modelDepth.low,modelDepth.high,m_state.renderTargets[0].ptr());
++    }
+ 
+     // Correctness Factor for 1/2 texel offset
+     // We need to bias this slightly to make
+@@ -5731,7 +5821,7 @@ namespace dxvk {
+     viewport = VkViewport{
+       float(vp.X)     + cf,    float(vp.Height + vp.Y) + cf,
+       float(vp.Width),        -float(vp.Height),
+-      vp.MinZ,                 vp.MaxZ,
++      modelDepth.low,          modelDepth.high,
+     };
+ 
+     // Scissor rectangles. Vulkan does not provide an easy way
+@@ -5896,6 +5986,10 @@ namespace dxvk {
+     state.enableDepthWrite  = rs[D3DRS_ZWRITEENABLE]  != FALSE;
+     state.enableStencilTest = stencil;
+     state.depthCompareOp    = DecodeCompareOp(D3DCMPFUNC(rs[D3DRS_ZFUNC]));
++    // Owned gun sprite draw only: transparent glow must respect the opaque
++    // housing/hand depth even when its native material requests ignore-Z.
++    ModelDepth::SpriteTest(m_vrModelDepth.sprites,state,VK_COMPARE_OP_LESS_OR_EQUAL);
++    if(m_vrModelDepth.sprites){static unsigned audits=0;if(audits++<12)PortalVrLog("Gun sprite GPU depth nativeTest=%u nativeWrite=%u nativeCompare=%u effectiveTest=%d effectiveWrite=%d effectiveCompare=%d",rs[D3DRS_ZENABLE],rs[D3DRS_ZWRITEENABLE],rs[D3DRS_ZFUNC],state.enableDepthTest,state.enableDepthWrite,state.depthCompareOp);}
+ 
+     if (stencil) {
+       state.stencilOpFront.failOp      = DecodeStencilOp(D3DSTENCILOP(rs[D3DRS_STENCILFAIL]));
+@@ -7159,6 +7253,17 @@ namespace dxvk {
    }
  
  
@@ -195,18 +267,33 @@ index b4bbd4a..cdb43cb 100644
            D3D9CommonTexture*       pResource,
      const VkImageSubresourceRange* pSubresources,
 diff --git a/src/d3d9/d3d9_device.h b/src/d3d9/d3d9_device.h
-index 8ce04e2..d70482f 100644
+index 8ce04e2..5a51888 100644
 --- a/src/d3d9/d3d9_device.h
 +++ b/src/d3d9/d3d9_device.h
-@@ -910,6 +910,8 @@ namespace dxvk {
+@@ -1,4 +1,5 @@
+ #pragma once
++#include "L4D2VR/modeldepth.h"
+ 
+ #include "../dxvk/dxvk_device.h"
+ #include "../dxvk/dxvk_cs.h"
+@@ -910,6 +911,9 @@ namespace dxvk {
  
      void TransitionImage(D3D9CommonTexture* pResource, VkImageLayout NewLayout);
  
 +    void TransformVrImage(const Rc<DxvkImage>& image, bool toVr);
++    void SetVrModelSceneDepth(bool enabled,bool sprites=false);
 +
      void TransformImage(
              D3D9CommonTexture*       pResource,
        const VkImageSubresourceRange* pSubresources,
+@@ -1261,6 +1265,7 @@ namespace dxvk {
+ 	D3D9UserDefinedAnnotation*      m_annotation = nullptr;
+ 
+     D3D9ViewportInfo                m_viewportInfo;
++    ModelDepth::State               m_vrModelDepth;
+ 
+     DxvkCsChunkPool                 m_csChunkPool;
+     dxvk::high_resolution_clock::time_point m_lastFlush
 diff --git a/src/d3d9/d3d9_interface.cpp b/src/d3d9/d3d9_interface.cpp
 index 9713399..5bf2310 100644
 --- a/src/d3d9/d3d9_interface.cpp
@@ -253,21 +340,24 @@ index 9713399..5bf2310 100644
  	return result;
    }
 diff --git a/src/d3d9/d3d9_vr.cpp b/src/d3d9/d3d9_vr.cpp
-index 8ed15b0..1a14bdf 100644
+index 8ed15b0..5900246 100644
 --- a/src/d3d9/d3d9_vr.cpp
 +++ b/src/d3d9/d3d9_vr.cpp
-@@ -9,6 +9,10 @@
+@@ -9,6 +9,13 @@
  
  #include "L4D2VR/game.h"
  #include "L4D2VR/vr.h"
 +#include "L4D2VR/sgsr-d3d9-interop.h"
 +#include "L4D2VR/overlaypixels.h"
++#include "L4D2VR/gpuworkload.h"
++#include "L4D2VR/renderpolicy.h"
++#include "L4D2VR/mirrorgeometry.h"
 +#include <map>
 +#include <memory>
  
  namespace dxvk {
  
-@@ -20,6 +24,11 @@ namespace dxvk {
+@@ -20,6 +27,11 @@ namespace dxvk {
              : m_device(static_cast<D3D9DeviceEx *>(pDevice))
          {}
  
@@ -279,7 +369,7 @@ index 8ed15b0..1a14bdf 100644
          HRESULT STDMETHODCALLTYPE QueryInterface(
              REFIID riid,
              void **ppvObject)
-@@ -79,22 +88,13 @@ namespace dxvk {
+@@ -79,22 +91,13 @@ namespace dxvk {
                  return D3DERR_INVALIDCALL;
  
              auto *tex = static_cast<D3D9Surface *>(pSurface)->GetCommonTexture();
@@ -306,7 +396,7 @@ index 8ed15b0..1a14bdf 100644
  
              return D3D_OK;
          }
-@@ -122,27 +122,171 @@ namespace dxvk {
+@@ -122,27 +125,206 @@ namespace dxvk {
  
          HRESULT STDMETHODCALLTYPE GetBackBufferData(SharedTextureHolder* backBufferData)
          {
@@ -455,15 +545,50 @@ index 8ed15b0..1a14bdf 100644
 +        HRESULT STDMETHODCALLTYPE WorldModelDepth(BOOL enabled) {
 +            if(enabled){
 +                if(m_worldDepth)return D3DERR_INVALIDCALL;
-+                if(FAILED(m_device->GetViewport(&m_savedViewport)))return E_FAIL;
-+                if(m_savedViewport.MinZ!=0.f||m_savedViewport.MaxZ>.25f)return S_FALSE;
-+                auto viewport=m_savedViewport;viewport.MinZ=0;viewport.MaxZ=1;
-+                const auto hr=m_device->SetViewport(&viewport);m_worldDepth=SUCCEEDED(hr);return hr;
++                m_worldDepth=true;m_device->SetVrModelSceneDepth(true,enabled==ModelDepth::SpriteMode);return S_OK;
 +            }
-+            if(!m_worldDepth)return S_FALSE;m_worldDepth=false;return m_device->SetViewport(&m_savedViewport);
++            if(!m_worldDepth)return S_FALSE;m_worldDepth=false;m_device->SetVrModelSceneDepth(false);return S_OK;
++        }
++        HRESULT STDMETHODCALLTYPE ProfileScene(UINT marker) {
++            auto* vr=g_Game?g_Game->m_VR:nullptr;if(!vr)return S_FALSE;
++            GpuWorkload::Metadata meta;meta.views=vr->m_LastSecondaryViews;meta.width=vr->m_RenderWidth;meta.height=vr->m_RenderHeight;
++            meta.upscaler=vr->m_Graphics.upscaler;meta.mirror=vr->m_EyeMirrorCandidate?1:vr->m_RenderWindow?2:0;
++            meta.phase=!vr->m_SystemFocus.focused?2:vr->m_GraphicsOpen||g_Game->IsCursorVisible()?1:0;meta.msaa=vr->m_ActiveMsaa;
++            meta.upscaleReady=vr->m_UpscaleReady;meta.outputWidth=meta.upscaleReady?vr->m_UpscaleWidth:meta.width;meta.outputHeight=meta.upscaleReady?vr->m_UpscaleHeight:meta.height;
++            if(marker==0){
++                m_gpuWorkload.Poll([](const GpuWorkload::Result& r){PortalVrLog("VR gpu workload phase=%s serial=%llu secondaryViews=%u scene=%ux%u output=%ux%u msaa=%d mirrorMode=%d upscaler=%d upscaleReady=%d leftGpuMs=%f rightGpuMs=%f mirrorGpuMs=%f mirrorCopyGpuMs=%f upscaleGpuMs=%f nativeResolveGpuMs=%f",r.meta.phase==0?"gameplay":r.meta.phase==1?"paused-scene":"system-focus",r.meta.serial,r.meta.views,r.meta.width,r.meta.height,r.meta.outputWidth,r.meta.outputHeight,r.meta.msaa,r.meta.mirror,r.meta.upscaler,r.meta.upscaleReady,r.left,r.right,r.mirror,r.copy,r.upscale,r.resolve);});
++                const auto cadence=RenderPolicy::GpuCadence(vr->m_Graphics.detailedGpuTiming,vr->m_Graphics.autoPortalGpuTiming,vr->m_Graphics.frameTimingLog,vr->m_LastSecondaryViews);
++                m_gpuWorkload.Begin(cadence!=0,meta,[&](D3DQUERYTYPE type,IDirect3DQuery9** out){return m_device->CreateQuery(type,out);},cadence);
++                if(m_gpuWorkload.Failed()&&!m_gpuFailureLogged){m_gpuFailureLogged=true;PortalVrLog("GPU workload queries unavailable; profiling disabled, rendering continues unchanged");}
++            }else {if(marker==3||marker==GpuWorkload::Markers-1)m_gpuWorkload.Update(meta);m_gpuWorkload.Mark(marker);}
++            return m_gpuWorkload.Active()?S_OK:S_FALSE;
++        }
++        HRESULT STDMETHODCALLTYPE CopyEyeMirror() {
++            auto* vr=g_Game?g_Game->m_VR:nullptr;
++            if(!vr||!vr->m_RenderedNewFrame||!vr->m_EyeMirrorCandidate||!vr->CanReuseEyeMirror())return S_FALSE;
++            const auto started=std::chrono::steady_clock::now();
++            const int eye=std::clamp(vr->m_Graphics.mirrorEye,0,1);
++            auto* source=eye?vr->m_D9RightEyeSurface:vr->m_D9LeftEyeSurface;
++            IDirect3DSurface9* target=nullptr;D3DSURFACE_DESC src{},dst{};
++            HRESULT result=m_device->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,&target);
++            if(SUCCEEDED(result)&&target&&source&&SUCCEEDED(source->GetDesc(&src))&&SUCCEEDED(target->GetDesc(&dst))){
++                const auto& bounds=vr->m_TextureBounds[eye];
++                const auto layout=MirrorGeometry::Fit(src.Width,src.Height,dst.Width,dst.Height,bounds.uMin,bounds.vMin,bounds.uMax,bounds.vMax,vr->m_Graphics.mirrorFit!=0);
++                if(layout.valid){
++                    RECT from{layout.source.left,layout.source.top,layout.source.right,layout.source.bottom};
++                    RECT to{layout.destination.left,layout.destination.top,layout.destination.right,layout.destination.bottom};
++                    result=m_device->ColorFill(target,nullptr,D3DCOLOR_ARGB(255,0,0,0));
++                    if(SUCCEEDED(result))result=m_device->StretchRect(source,&from,target,&to,D3DTEXF_LINEAR);
++                }else result=D3DERR_INVALIDCALL;
++            }else result=E_FAIL;
++            if(target)target->Release();
++            vr->m_LastMirrorRenderMs+=std::chrono::duration<float,std::milli>(std::chrono::steady_clock::now()-started).count();
++            if(FAILED(result)){vr->m_EyeMirrorFailed=true;PortalVrLog("Eye mirror copy failed hr=%lx; separate desktop render resumes next frame",result);}
++            return result;
 +        }
      private:
-+        D3DVIEWPORT9 m_savedViewport{};bool m_worldDepth=false;
++        GpuWorkload::Ring m_gpuWorkload;bool m_gpuFailureLogged=false;
++        bool m_worldDepth=false;
 +        struct OverlayImage {
 +            IDirect3DTexture9* texture=nullptr;IDirect3DSurface9* surface=nullptr;
 +            uint32_t width=0,height=0;bool dirty=false;SharedTextureHolder shared;
@@ -492,7 +617,7 @@ index 8ed15b0..1a14bdf 100644
          D3D9DeviceEx *m_device;
          D3D9DeviceLock m_lock;
      };
-@@ -156,4 +300,4 @@ HRESULT __stdcall Direct3DCreateVRImpl(IDirect3DDevice9 *pDevice, IDirect3DVR9 *
+@@ -156,4 +338,4 @@ HRESULT __stdcall Direct3DCreateVRImpl(IDirect3DDevice9 *pDevice, IDirect3DVR9 *
      *pInterface = new dxvk::D3D9VR(pDevice);
  
      return D3D_OK;
@@ -500,10 +625,10 @@ index 8ed15b0..1a14bdf 100644
 \ No newline at end of file
 +}
 diff --git a/src/d3d9/d3d9_vr.h b/src/d3d9/d3d9_vr.h
-index b906cf7..e47468f 100644
+index b906cf7..a4ca1d5 100644
 --- a/src/d3d9/d3d9_vr.h
 +++ b/src/d3d9/d3d9_vr.h
-@@ -33,6 +33,15 @@ IDirect3DVR9 : public IUnknown{
+@@ -33,6 +33,17 @@ IDirect3DVR9 : public IUnknown{
    virtual HRESULT STDMETHODCALLTYPE UnlockDevice() = 0;
    virtual HRESULT STDMETHODCALLTYPE WaitDeviceIdle() = 0;
    virtual HRESULT STDMETHODCALLTYPE GetBackBufferData(SharedTextureHolder *backBufferData) = 0;
@@ -516,10 +641,12 @@ index b906cf7..e47468f 100644
 +  virtual HRESULT STDMETHODCALLTYPE UploadOverlayPixels(uint64_t handle,const uint32_t* pixels,uint32_t width,uint32_t height) = 0;
 +  virtual HRESULT STDMETHODCALLTYPE SubmitOverlayTextures() = 0;
 +  virtual HRESULT STDMETHODCALLTYPE WorldModelDepth(BOOL enabled) = 0;
++  virtual HRESULT STDMETHODCALLTYPE ProfileScene(UINT marker) = 0;
++  virtual HRESULT STDMETHODCALLTYPE CopyEyeMirror() = 0;
  };
  
  #ifdef _MSC_VER
-@@ -42,4 +51,4 @@ __CRT_UUID_DECL(IDirect3DVR9, 0x7e272b32, 0xa49c, 0x46c7, 0xb1, 0xa4, 0xef, 0x52
+@@ -42,4 +53,4 @@ __CRT_UUID_DECL(IDirect3DVR9, 0x7e272b32, 0xa49c, 0x46c7, 0xb1, 0xa4, 0xef, 0x52
  #endif
  
  HRESULT __stdcall Direct3DCreateVRImpl(IDirect3DDevice9 *pDevice,
