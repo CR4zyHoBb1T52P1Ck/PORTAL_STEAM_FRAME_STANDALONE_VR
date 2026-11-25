@@ -1,0 +1,9 @@
+# PCVR public release validation
+
+Native artifact: owner-tested **PCVR-10-HudRecovery**, SHA256 `82e83b834d64a5953bcb4bec2cca50601df09a426114b4b3ef7ebe746e73f84b`. Packaging does not rebuild or substitute this DLL. Owner November25 test called this the most feature-complete and stable PCVR version so far, with commentary HUD and physical red-switch pressing still unfinished. The test's process returncode was1; that alone does not identify a crash cause, and no crash-free/campaign-wide claim is made.
+
+Development qualification: native build0errors/578existing warnings, CPU+ASAN real-rig crouch/stride/jump/neck/grip/arm cases and94Python checks. Stereo native HUD drawing is unconditionally excluded to recover from09's severe regression. Ground flags resolved on retail08/09followup, known1/offset34c. Release packaging additionally checks payload hashes, archive content, generated-assets exclusion, portable entry points, installer fixtures, source/runtime consistency and a clean public-source build. No new interactive game/GPU test is launched for packaging. Controller acceptance is primarily Index, not every included profile.
+
+The runtime ZIP includes only mod/runtime dependencies, generic defaults, code, artwork references and owned-asset generators. No game VPK/texture/model data, generated shell BVH, private skin, saves, recordings, diagnostic logs, credentials or local developer settings are distributed. Existing credits/licenses are unchanged. Backups and local evidence remain private. Frame Heavy Petting release assets remain unchanged.
+
+Checksums identify each archive and internal package file. Source runtime headers/C++/shader files are pinned to the accepted development tree; build script/output paths do not deploy into a game. The qualification rebuild is never substituted for the accepted DLL. Headset testing is owner-led with no automatic game deadline. Silent diagnostics stay local until a user chooses to share them.

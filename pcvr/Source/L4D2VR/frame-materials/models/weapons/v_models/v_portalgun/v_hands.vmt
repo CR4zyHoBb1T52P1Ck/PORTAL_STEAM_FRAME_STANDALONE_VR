@@ -1,0 +1,8 @@
+"VertexLitGeneric"
+{
+    // Portal's retail material points at v_models/v_hands/v_hands, while the
+    // owned texture is actually stored beside the native portal-gun material.
+    "$basetexture" "models/weapons/v_models/v_portalgun/v_hands"
+    "$model" "1"
+    "$halflambert" "1"
+}

@@ -1,3 +1,19 @@
+# Portal VR — PCVR and standalone Frame
+
+**[Download the first dedicated PCVR release — PCVR10](https://github.com/CR4zyHoBb1T52P1Ck/PORTAL_STEAM_FRAME_STANDALONE_VR/releases/tag/v0.2.0-pcvr.1)**
+
+Desktop SteamVR/Index players can now try the tracked hands/body, complete animated portal gun, firm two-hand grip, shoulder holsters, calibration, optional world/prop physics, VR menus and themed diagnostic launcher developed through this project. This is the exact owner-tested PCVR10 runtime. Commentary HUD and physical small red-button presses remain unfinished.
+
+[PCVR features / release notes](docs/PCVR_RELEASE.md) · [PCVR setup and controls](pcvr/Launcher/docs/GETTING_STARTED.md) · [PCVR source build](pcvr/BUILDING.md)
+
+**[Standalone Frame users: Heavy Petting / Contact55](https://github.com/CR4zyHoBb1T52P1Ck/PORTAL_STEAM_FRAME_STANDALONE_VR/releases/tag/v0.1.0-beta.5-contact55)** remains the separate Frame download. Frame hardware hiatus continues; this PCVR release does not update the Frame-local launch profile. Portal2 is a separate project.
+
+Thank you to everyone following, testing, sharing and supporting this project! [Development videos](https://www.youtube.com/@DevDoesDevThings) · [Ko-fi](https://ko-fi.com/devdoesdevthings).
+
+The earlier project description, credits and Frame release history are preserved below.
+
+---
+
 # The Heavy Petting Update — Contact-55
 
 [Download public beta5](https://github.com/CR4zyHoBb1T52P1Ck/PORTAL_STEAM_FRAME_STANDALONE_VR/releases/tag/v0.1.0-beta.5-contact55) contains the exact last build

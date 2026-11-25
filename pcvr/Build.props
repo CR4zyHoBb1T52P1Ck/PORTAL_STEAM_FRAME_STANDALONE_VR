@@ -1,0 +1,4 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+ <PropertyGroup><OutDir>$(MSBuildThisFileDirectory)Build\bin\</OutDir><IntDir>$(MSBuildThisFileDirectory)Build\obj\$(MSBuildProjectName)\</IntDir><TrackFileAccess>false</TrackFileAccess></PropertyGroup>
+ <ItemDefinitionGroup><ClCompile><DebugInformationFormat>OldStyle</DebugInformationFormat></ClCompile><Link><GenerateDebugInformation>false</GenerateDebugInformation></Link></ItemDefinitionGroup>
+</Project>

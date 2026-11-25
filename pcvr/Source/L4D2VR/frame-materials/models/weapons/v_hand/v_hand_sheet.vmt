@@ -1,0 +1,9 @@
+"VertexLitGeneric"
+{
+    // Match the Portal gun's native Chell hand atlas on independent VR hands.
+    "$basetexture" "models/weapons/v_models/v_portalgun/v_hands"
+    "$model" "1"
+    "$halflambert" "1"
+    "$vertexcolor" "0"
+    "$vertexalpha" "0"
+}

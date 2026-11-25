@@ -1,0 +1,9 @@
+"VertexLitGeneric"
+{
+    // This is the actual material referenced by weapons/V_hands.mdl.
+    "$basetexture" "models/weapons/v_models/v_portalgun/v_hands"
+    "$model" "1"
+    "$halflambert" "1"
+    "$vertexcolor" "0"
+    "$vertexalpha" "0"
+}
